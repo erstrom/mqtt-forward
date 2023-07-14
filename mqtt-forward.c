@@ -15,20 +15,28 @@
 #include <unistd.h>
 #include <mosquitto.h>
 #include <getopt.h>
+#include <poll.h>
 
 #define MAX_SESSIONS 100
 #define SESSION_RX_BUF_SIZE 10000
 #define SESSION_BACKLOG_SIZE 200
+#define TX_WINDOW_LIMIT 100
 
 struct packet_backlog_data {
 	uint8_t *buf;
 	size_t len;
 };
 
-struct packet_backlog {
+struct rx_packet_backlog {
 	struct packet_backlog_data backlog[SESSION_BACKLOG_SIZE];
 	uint64_t expected_seq_nbr;
 	int read_idx;
+};
+
+struct tx_packet_backlog {
+	struct packet_backlog_data backlog[SESSION_BACKLOG_SIZE];
+	uint64_t acked_seq_nbr;
+	int first_unacked_idx;
 };
 
 struct tcp_session {
@@ -37,12 +45,16 @@ struct tcp_session {
 	int sock;
 	uint8_t *rx_buf;
 	uint64_t tx_seq_nbr;
-	struct packet_backlog rx_backlog;
+	struct rx_packet_backlog rx_backlog;
+	struct tx_packet_backlog tx_backlog;
 };
 
 struct tcp_over_mqtt_hdr {
 	uint64_t seq_nbr;
+	uint64_t acked_seq_nbr;
 #define TCP_OVER_MQTT_FLAG_TCP_DISCONNECT (1)
+#define TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR (2)
+#define TCP_OVER_MQTT_FLAG_NO_DATA (4)
 	uint32_t flags;
 	uint32_t pad;
 } __attribute__((packed));
@@ -71,7 +83,7 @@ static char mqtt_root_ca[100];
 static char mqtt_certificate[100];
 static char mqtt_private_key[100];
 
-static void clear_packet_backlog(struct packet_backlog *rx_backlog)
+static void clear_rx_packet_backlog(struct rx_packet_backlog *rx_backlog)
 {
 	int i;
 
@@ -83,6 +95,17 @@ static void clear_packet_backlog(struct packet_backlog *rx_backlog)
 	       sizeof(rx_backlog->backlog[0])*SESSION_BACKLOG_SIZE);
 }
 
+static void clear_tx_packet_backlog(struct tx_packet_backlog *tx_backlog)
+{
+	int i;
+
+	for (i = 0; i < SESSION_BACKLOG_SIZE; i++)
+		free(tx_backlog->backlog[i].buf);
+
+	memset(&tx_backlog->backlog[0],
+	       0,
+	       sizeof(tx_backlog->backlog[0])*SESSION_BACKLOG_SIZE);
+}
 
 static void clear_session(struct tcp_session *session_data)
 {
@@ -91,7 +114,8 @@ static void clear_session(struct tcp_session *session_data)
 	free(session_data->session_id);
 	free(session_data->rx_buf);
 	free(session_data->publish_topic);
-	clear_packet_backlog(&session_data->rx_backlog);
+	clear_rx_packet_backlog(&session_data->rx_backlog);
+	clear_tx_packet_backlog(&session_data->tx_backlog);
 	memset(session_data, 0, sizeof(*session_data));
 	pthread_mutex_unlock(&session_mtx);
 }
@@ -135,48 +159,127 @@ static void *tcp_session_rx_thread_fn(void *arg)
 	struct tcp_session *session_data;
 	struct tcp_over_mqtt_hdr tx_hdr;
 	int sock;
+	int backlog_offset;
+	int backlog_write_idx;
 	char *topic;
+	struct tx_packet_backlog *tx_backlog;
+	struct rx_packet_backlog *rx_backlog;
+	struct timespec sleep_time = {.tv_nsec = 100000000};
+	struct pollfd fds = {.events = POLLIN};
 
 	session_data = (struct tcp_session *)arg;
 
 	rx_buf = session_data->rx_buf;
 	sock = session_data->sock;
+	fds.fd = sock;
 	topic = session_data->publish_topic;
+	tx_backlog = &session_data->tx_backlog;
+	rx_backlog = &session_data->rx_backlog;
 
 	for (;;) {
-		recv_len = recv(sock,
-				rx_buf + sizeof(tx_hdr),
-				SESSION_RX_BUF_SIZE - sizeof(tx_hdr),
-				0);
-		if (recv_len < 0) {
-			fprintf(stderr, "%s: recv errno: %d\n", __func__, errno);
-			break;
-		} else if (recv_len == 0) {
-			fprintf(stderr, "%s: TCP connection terminated\n", __func__);
-			break;
-		}
+		backlog_offset = session_data->tx_seq_nbr - tx_backlog->acked_seq_nbr - 1;
+		backlog_write_idx =
+			(tx_backlog->first_unacked_idx + backlog_offset) % SESSION_BACKLOG_SIZE;
 
-		tx_hdr.seq_nbr = session_data->tx_seq_nbr;
-		tx_hdr.flags = 0;
-		memcpy(rx_buf, &tx_hdr, sizeof(tx_hdr));
-		recv_len += sizeof(tx_hdr);
+		if (backlog_offset > TX_WINDOW_LIMIT) {
+			/* TX window is full. Stop reading more data from input
+			 * socket and start re-transmit the lost frame */
+			pthread_mutex_lock(&session_mtx);
+			struct tcp_over_mqtt_hdr *retransmit_tx_hdr =
+				(struct tcp_over_mqtt_hdr *)tx_backlog->backlog[tx_backlog->first_unacked_idx].buf;
 
-		ret = mosquitto_publish(g_mqtt_client,
-					NULL,
+			if (rx_backlog->expected_seq_nbr > 1) {
+				retransmit_tx_hdr->flags |= TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR;
+				retransmit_tx_hdr->acked_seq_nbr =
+					rx_backlog->expected_seq_nbr - 1;
+			} else {
+				retransmit_tx_hdr->flags = 0;
+			}
+
+			ret = mosquitto_publish(g_mqtt_client,
+						NULL,
+						topic,
+						tx_backlog->backlog[tx_backlog->first_unacked_idx].len,
+						tx_backlog->backlog[tx_backlog->first_unacked_idx].buf,
+						mqtt_qos,
+						false /*retain*/);
+			pthread_mutex_unlock(&session_mtx);
+			(void)nanosleep(&sleep_time, NULL);
+		} else {
+			/* Only read from TCP socket if the TX window is not exceeded */
+			ret = poll(&fds, 1, 500);
+			if (ret < 0) {
+				fprintf(stderr, "%s: poll errno: %d\n", __func__, errno);
+				break;
+			} else if (ret == 0) {
+				/* Timeout */
+				tx_hdr.seq_nbr = 0;
+				tx_hdr.flags = TCP_OVER_MQTT_FLAG_NO_DATA;
+				if (rx_backlog->expected_seq_nbr > 1) {
+					tx_hdr.flags |= TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR;
+					tx_hdr.acked_seq_nbr =
+						rx_backlog->expected_seq_nbr - 1;
+				}
+				ret = mosquitto_publish(g_mqtt_client,
+							NULL,
+							topic,
+							sizeof(tx_hdr),
+							&tx_hdr,
+							mqtt_qos,
+							false /*retain*/);
+				if (ret) {
+
+					fprintf(stderr, "Publishing on topic %s failed. Result %d\n",
+						topic,
+						ret);
+					break;
+				}
+				continue;
+			}
+
+			/* Data has been received on socket */
+			recv_len = recv(sock,
+					rx_buf + sizeof(tx_hdr),
+					SESSION_RX_BUF_SIZE - sizeof(tx_hdr),
+					0);
+			if (recv_len < 0) {
+				fprintf(stderr, "%s: recv errno: %d\n", __func__, errno);
+				break;
+			} else if (recv_len == 0) {
+				fprintf(stderr, "%s: TCP connection terminated\n", __func__);
+				break;
+			}
+
+			pthread_mutex_lock(&session_mtx);
+			tx_hdr.seq_nbr = session_data->tx_seq_nbr;
+			tx_hdr.flags = 0;
+			if (rx_backlog->expected_seq_nbr > 1) {
+				tx_hdr.flags |= TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR;
+				tx_hdr.acked_seq_nbr = rx_backlog->expected_seq_nbr - 1;
+			}
+			memcpy(rx_buf, &tx_hdr, sizeof(tx_hdr));
+			recv_len += sizeof(tx_hdr);
+
+			tx_backlog->backlog[backlog_write_idx].buf = malloc(recv_len);
+			tx_backlog->backlog[backlog_write_idx].len = recv_len;
+			memcpy(tx_backlog->backlog[backlog_write_idx].buf, rx_buf, recv_len);
+			session_data->tx_seq_nbr++;
+			pthread_mutex_unlock(&session_mtx);
+			ret = mosquitto_publish(g_mqtt_client,
+						NULL,
+						topic,
+						recv_len,
+						rx_buf,
+						mqtt_qos,
+						false /*retain*/);
+			if (ret) {
+
+				fprintf(stderr, "Publishing on topic %s failed. Result %d\n",
 					topic,
-					recv_len,
-					rx_buf,
-					mqtt_qos,
-					false /*retain*/);
-		if (ret) {
-
-			fprintf(stderr, "Publishing on topic %s failed. Result %d\n",
-				topic,
-				ret);
-			break;
+					ret);
+				break;
+			}
 		}
-
-		session_data->tx_seq_nbr++;
 	}
 	fprintf(stderr, "%s: TCP session ended\n", __func__);
 
@@ -191,7 +294,6 @@ static void *tcp_session_rx_thread_fn(void *arg)
 				 (uint8_t*)&tx_hdr,
 				 mqtt_qos,
 				 false /*retain*/);
-	clear_packet_backlog(&session_data->rx_backlog);
 	clear_session(session_data);
 
 	return NULL;
@@ -273,6 +375,8 @@ static int create_session(const char *session_id,
 	tcp_sessions[session_nbr_local].session_id = session_id_local;
 	tcp_sessions[session_nbr_local].sock = tcp_sock;
 	tcp_sessions[session_nbr_local].rx_buf = calloc(SESSION_RX_BUF_SIZE, 1);
+	tcp_sessions[session_nbr_local].rx_backlog.expected_seq_nbr = 1;
+	tcp_sessions[session_nbr_local].tx_seq_nbr = 1;
 	tcp_sessions[session_nbr_local].publish_topic = calloc(200, 1);
 	if (server_session)
 		snprintf(tcp_sessions[session_nbr_local].publish_topic,
@@ -382,13 +486,15 @@ static void handle_mqtt_message(uint8_t *msg,
 				bool server_session)
 {
 	int ret;
+	int i;
 	uint64_t seq_nbr;
 	int data_len;
 	uint8_t *data;
 	int backlog_write_idx;
 	int backlog_offset;
 	struct tcp_over_mqtt_hdr rx_hdr;
-	struct packet_backlog *rx_backlog;
+	struct rx_packet_backlog *rx_backlog;
+	struct tx_packet_backlog *tx_backlog;
 	size_t session_nbr;
 
 	memcpy(&rx_hdr, msg, sizeof(rx_hdr));
@@ -398,10 +504,6 @@ static void handle_mqtt_message(uint8_t *msg,
 	for (session_nbr = 0; session_nbr < MAX_SESSIONS; session_nbr++) {
 		if ((tcp_sessions[session_nbr].session_id) &&
 		    (strncmp(tcp_sessions[session_nbr].session_id, session_id, session_id_len) == 0)) {
-			fprintf(stderr, "%s: session %s exists on session number %lu\n",
-				 __func__,
-				 tcp_sessions[session_nbr].session_id,
-				 session_nbr);
 			break;
 		}
 	}
@@ -425,12 +527,26 @@ static void handle_mqtt_message(uint8_t *msg,
 	}
 
 	rx_backlog = &tcp_sessions[session_nbr].rx_backlog;
+	tx_backlog = &tcp_sessions[session_nbr].tx_backlog;
 
-	fprintf(stderr, "%s: Seq: %lu, %d bytes. Expected seq %ld\n",
-		__func__,
-		seq_nbr,
-		msg_len,
-		rx_backlog->expected_seq_nbr);
+	pthread_mutex_lock(&session_mtx);
+	if (rx_hdr.flags & TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR) {
+		for (i = tx_backlog->acked_seq_nbr; i < rx_hdr.acked_seq_nbr; i++) {
+			struct tcp_over_mqtt_hdr *tx_hdr =
+				(struct tcp_over_mqtt_hdr *)tx_backlog->backlog[tx_backlog->first_unacked_idx].buf;
+			fprintf(stderr, "%s: Freeing TX backlog: seq no. %4lu\n",
+				__func__, tx_hdr->seq_nbr);
+			free(tx_backlog->backlog[tx_backlog->first_unacked_idx].buf);
+			tx_backlog->backlog[tx_backlog->first_unacked_idx].buf = NULL;
+			tx_backlog->first_unacked_idx++;
+			tx_backlog->first_unacked_idx %= SESSION_BACKLOG_SIZE;
+		}
+
+		tx_backlog->acked_seq_nbr = (rx_hdr.acked_seq_nbr > tx_backlog->acked_seq_nbr) ?
+			rx_hdr.acked_seq_nbr : tx_backlog->acked_seq_nbr;
+
+	}
+	pthread_mutex_unlock(&session_mtx);
 
 	if (rx_hdr.flags & TCP_OVER_MQTT_FLAG_TCP_DISCONNECT) {
 		fprintf(stderr, "%s: Seq: %lu, Remote connection terminated\n",
@@ -439,12 +555,16 @@ static void handle_mqtt_message(uint8_t *msg,
 		return;
 	}
 
+	if (rx_hdr.flags & TCP_OVER_MQTT_FLAG_NO_DATA) {
+		fprintf(stderr, "%s: No data frame received\n", __func__);
+		return;
+	}
+
 	data_len = msg_len - sizeof(rx_hdr);
 	data = msg + sizeof(rx_hdr);
 	if (rx_backlog->expected_seq_nbr > seq_nbr) {
-		/* Reset the expected counter */
-		clear_packet_backlog(rx_backlog);
-		rx_backlog->expected_seq_nbr = seq_nbr;
+		/* Ignore old packets */
+		return;
 	}
 
 	backlog_offset = seq_nbr - rx_backlog->expected_seq_nbr;
@@ -478,11 +598,6 @@ static void handle_mqtt_message(uint8_t *msg,
 	memcpy(rx_backlog->backlog[backlog_write_idx].buf, data, data_len);
 
 	while (rx_backlog->backlog[rx_backlog->read_idx].buf) {
-		fprintf(stderr, "%s: Seq: %lu, send %ld bytes to local SSH client.\n",
-			__func__,
-			rx_backlog->expected_seq_nbr,
-			rx_backlog->backlog[rx_backlog->read_idx].len);
-
 		send(tcp_sessions[session_nbr].sock,
 		     rx_backlog->backlog[rx_backlog->read_idx].buf,
 		     rx_backlog->backlog[rx_backlog->read_idx].len,
