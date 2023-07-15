@@ -18,6 +18,7 @@
 #include <poll.h>
 
 #define MAX_SESSIONS 100
+#define MAX_LIFETIME_SESSIONS (MAX_SESSIONS*100)
 #define SESSION_RX_BUF_SIZE 10000
 #define SESSION_BACKLOG_SIZE 200
 #define TX_WINDOW_LIMIT 100
@@ -70,6 +71,8 @@ static bool connected_to_mqtt_server;
 static bool server_mode;
 static struct tcp_session tcp_sessions[MAX_SESSIONS];
 static struct sockaddr_in *remote_tcp_server_addr;
+static char *old_session_ids[MAX_LIFETIME_SESSIONS];
+static size_t num_old_sessions;
 
 static pthread_mutex_t session_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -111,7 +114,9 @@ static void clear_session(struct tcp_session *session_data)
 {
 	fprintf(stderr, "%s: TCP session %s terminated\n", __func__, session_data->session_id);
 	pthread_mutex_lock(&session_mtx);
-	free(session_data->session_id);
+	/* Store the session ID of the cleared session in the old session id
+	 * array */
+	old_session_ids[num_old_sessions++] = session_data->session_id;
 	free(session_data->rx_buf);
 	free(session_data->publish_topic);
 	clear_rx_packet_backlog(&session_data->rx_backlog);
@@ -504,6 +509,17 @@ static void handle_mqtt_message(uint8_t *msg,
 		if (!server_session)
 			return;
 
+		/* Before a new session is created we must check if the message
+		 * belongs to an old session. In this case it should be
+		 * discarded */
+		for (i = 0; i < num_old_sessions; i++) {
+			if (strncmp(old_session_ids[i], session_id, session_id_len) == 0) {
+				fprintf(stderr, "%s: Session ID %s is an old session. Message discarded\n",
+					__func__, old_session_ids[i]);
+				return;
+			}
+		}
+
 		pthread_mutex_lock(&session_mtx);
 		ret = create_session(session_id,
 				     session_id_len,
@@ -520,6 +536,16 @@ static void handle_mqtt_message(uint8_t *msg,
 
 	pthread_mutex_lock(&session_mtx);
 	if (rx_hdr.flags & TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR) {
+		if (rx_hdr.acked_seq_nbr >= tcp_sessions[session_nbr].tx_seq_nbr) {
+			/* The acked sequence number can't equal or exceed the
+			 * TX sequence number we are about to send. In this
+			 * case, the received frame is some kind of artifact
+			 * from a previous session. The session is thus invalid
+			 * and should be removed. */
+			clear_session(&tcp_sessions[session_nbr]);
+			return;
+		}
+
 		for (i = tx_backlog->acked_seq_nbr; i < rx_hdr.acked_seq_nbr; i++) {
 			struct tcp_over_mqtt_hdr *tx_hdr =
 				(struct tcp_over_mqtt_hdr *)tx_backlog->backlog[tx_backlog->first_unacked_idx].buf;
