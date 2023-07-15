@@ -153,6 +153,8 @@ static char *gen_session_id()
 		session_id[2*i+1] = nibble_2nd;
 	}
 
+	fclose(fp);
+
 	return session_id;
 }
 
@@ -553,6 +555,7 @@ static void handle_mqtt_message(uint8_t *msg,
 				__func__, tx_hdr->seq_nbr);
 			free(tx_backlog->backlog[tx_backlog->first_unacked_idx].buf);
 			tx_backlog->backlog[tx_backlog->first_unacked_idx].buf = NULL;
+			tx_backlog->backlog[tx_backlog->first_unacked_idx].len = 0xdead;
 			tx_backlog->first_unacked_idx++;
 			tx_backlog->first_unacked_idx %= SESSION_BACKLOG_SIZE;
 		}
@@ -606,13 +609,20 @@ static void handle_mqtt_message(uint8_t *msg,
 	memcpy(rx_backlog->backlog[backlog_write_idx].buf, data, data_len);
 
 	while (rx_backlog->backlog[rx_backlog->read_idx].buf) {
-		send(tcp_sessions[session_nbr].sock,
-		     rx_backlog->backlog[rx_backlog->read_idx].buf,
-		     rx_backlog->backlog[rx_backlog->read_idx].len,
-		     0);
+		ret = send(tcp_sessions[session_nbr].sock,
+			   rx_backlog->backlog[rx_backlog->read_idx].buf,
+			   rx_backlog->backlog[rx_backlog->read_idx].len,
+			   MSG_NOSIGNAL);
+		if ((ret < 0) && (errno == EPIPE)) {
+			fprintf(stderr, "%s: Remote socket closed. Clearing session %s\n",
+				__func__, tcp_sessions[session_nbr].session_id);
+			clear_session(&tcp_sessions[session_nbr]);
+			return;
+		}
 
 		free(rx_backlog->backlog[rx_backlog->read_idx].buf);
 		rx_backlog->backlog[rx_backlog->read_idx].buf = NULL;
+		rx_backlog->backlog[rx_backlog->read_idx].len = 0xdead;
 
 		rx_backlog->expected_seq_nbr++;
 		rx_backlog->read_idx++;
