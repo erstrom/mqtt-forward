@@ -283,17 +283,6 @@ static void *tcp_session_rx_thread_fn(void *arg)
 	}
 	fprintf(stderr, "%s: TCP session ended\n", __func__);
 
-	fprintf(stderr, "%s: Sending disconnect message to remote host for session %s\n",
-		__func__,
-		session_data->session_id);
-	tx_hdr.flags = TCP_OVER_MQTT_FLAG_TCP_DISCONNECT;
-	(void) mosquitto_publish(g_mqtt_client,
-				 NULL,
-				 topic,
-				 sizeof(tx_hdr),
-				 (uint8_t*)&tx_hdr,
-				 mqtt_qos,
-				 false /*retain*/);
 	clear_session(session_data);
 
 	return NULL;
@@ -547,13 +536,6 @@ static void handle_mqtt_message(uint8_t *msg,
 
 	}
 	pthread_mutex_unlock(&session_mtx);
-
-	if (rx_hdr.flags & TCP_OVER_MQTT_FLAG_TCP_DISCONNECT) {
-		fprintf(stderr, "%s: Seq: %lu, Remote connection terminated\n",
-			__func__,
-			seq_nbr);
-		return;
-	}
 
 	if (rx_hdr.flags & TCP_OVER_MQTT_FLAG_NO_DATA) {
 		fprintf(stderr, "%s: No data frame received\n", __func__);
