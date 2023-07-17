@@ -483,18 +483,16 @@ static void handle_mqtt_message(uint8_t *msg,
 {
 	int ret;
 	int i;
-	uint64_t seq_nbr;
 	int data_len;
 	uint8_t *data;
 	int backlog_write_idx;
 	int backlog_offset;
-	struct tcp_over_mqtt_hdr rx_hdr;
+	struct tcp_over_mqtt_hdr *rx_hdr;
 	struct rx_packet_backlog *rx_backlog;
 	struct tx_packet_backlog *tx_backlog;
 	size_t session_nbr;
 
-	memcpy(&rx_hdr, msg, sizeof(rx_hdr));
-	seq_nbr = rx_hdr.seq_nbr;
+	rx_hdr = (struct tcp_over_mqtt_hdr *) msg;
 
 	/* Check if there is a session for this session ID */
 	for (session_nbr = 0; session_nbr < MAX_SESSIONS; session_nbr++) {
@@ -537,8 +535,8 @@ static void handle_mqtt_message(uint8_t *msg,
 	tx_backlog = &tcp_sessions[session_nbr].tx_backlog;
 
 	pthread_mutex_lock(&session_mtx);
-	if (rx_hdr.flags & TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR) {
-		if (rx_hdr.acked_seq_nbr >= tcp_sessions[session_nbr].tx_seq_nbr) {
+	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR) {
+		if (rx_hdr->acked_seq_nbr >= tcp_sessions[session_nbr].tx_seq_nbr) {
 			/* The acked sequence number can't equal or exceed the
 			 * TX sequence number we are about to send. In this
 			 * case, the received frame is some kind of artifact
@@ -548,7 +546,7 @@ static void handle_mqtt_message(uint8_t *msg,
 			return;
 		}
 
-		for (i = tx_backlog->acked_seq_nbr; i < rx_hdr.acked_seq_nbr; i++) {
+		for (i = tx_backlog->acked_seq_nbr; i < rx_hdr->acked_seq_nbr; i++) {
 			struct tcp_over_mqtt_hdr *tx_hdr =
 				(struct tcp_over_mqtt_hdr *)tx_backlog->backlog[tx_backlog->first_unacked_idx].buf;
 			fprintf(stderr, "%s: Freeing TX backlog: seq no. %4lu\n",
@@ -560,25 +558,25 @@ static void handle_mqtt_message(uint8_t *msg,
 			tx_backlog->first_unacked_idx %= SESSION_BACKLOG_SIZE;
 		}
 
-		tx_backlog->acked_seq_nbr = (rx_hdr.acked_seq_nbr > tx_backlog->acked_seq_nbr) ?
-			rx_hdr.acked_seq_nbr : tx_backlog->acked_seq_nbr;
+		tx_backlog->acked_seq_nbr = (rx_hdr->acked_seq_nbr > tx_backlog->acked_seq_nbr) ?
+			rx_hdr->acked_seq_nbr : tx_backlog->acked_seq_nbr;
 
 	}
 	pthread_mutex_unlock(&session_mtx);
 
-	if (rx_hdr.flags & TCP_OVER_MQTT_FLAG_NO_DATA) {
+	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_NO_DATA) {
 		fprintf(stderr, "%s: No data frame received\n", __func__);
 		return;
 	}
 
-	data_len = msg_len - sizeof(rx_hdr);
-	data = msg + sizeof(rx_hdr);
-	if (rx_backlog->expected_seq_nbr > seq_nbr) {
+	data_len = msg_len - sizeof(*rx_hdr);
+	data = msg + sizeof(*rx_hdr);
+	if (rx_backlog->expected_seq_nbr > rx_hdr->seq_nbr) {
 		/* Ignore old packets */
 		return;
 	}
 
-	backlog_offset = seq_nbr - rx_backlog->expected_seq_nbr;
+	backlog_offset = rx_hdr->seq_nbr - rx_backlog->expected_seq_nbr;
 
 	if (backlog_offset > SESSION_BACKLOG_SIZE - 2) {
 		fprintf(stderr, "%s: backlog exceeded\n", __func__);
