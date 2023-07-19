@@ -551,8 +551,6 @@ static void handle_mqtt_message(uint8_t *msg,
 		}
 
 		for (i = tx_backlog->acked_seq_nbr; i < rx_hdr->acked_seq_nbr; i++) {
-			struct tcp_over_mqtt_hdr *tx_hdr =
-				(struct tcp_over_mqtt_hdr *)tx_backlog->backlog[tx_backlog->first_unacked_idx].buf;
 			if (!tx_backlog->backlog[tx_backlog->first_unacked_idx].buf) {
 				fprintf(stderr, "%s: TX backlog index %d already free'd!\n",
 					__func__, tx_backlog->first_unacked_idx);
@@ -585,6 +583,13 @@ static void handle_mqtt_message(uint8_t *msg,
 	}
 
 	backlog_offset = rx_hdr->seq_nbr - rx_backlog->expected_seq_nbr;
+
+	if (backlog_offset < 0) {
+		fprintf(stderr, "%s: backlog offset is negative! Corrupt input data?\n", __func__);
+		fprintf(stderr, "RX sequence number: %4lu\n",
+			rx_hdr->seq_nbr);
+		return;
+	}
 
 	if (backlog_offset > SESSION_BACKLOG_SIZE - 2) {
 		fprintf(stderr, "%s: backlog exceeded\n", __func__);
