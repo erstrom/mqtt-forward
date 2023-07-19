@@ -184,14 +184,12 @@ static void *tcp_session_rx_thread_fn(void *arg)
 	rx_backlog = &session_data->rx_backlog;
 
 	for (;;) {
+		pthread_mutex_lock(&session_mtx);
 		backlog_offset = session_data->tx_seq_nbr - tx_backlog->acked_seq_nbr - 1;
-		backlog_write_idx =
-			(tx_backlog->first_unacked_idx + backlog_offset) % SESSION_BACKLOG_SIZE;
 
 		if (backlog_offset > TX_WINDOW_LIMIT) {
 			/* TX window is full. Stop reading more data from input
 			 * socket and start re-transmit the lost frame */
-			pthread_mutex_lock(&session_mtx);
 			struct tcp_over_mqtt_hdr *retransmit_tx_hdr =
 				(struct tcp_over_mqtt_hdr *)tx_backlog->backlog[tx_backlog->first_unacked_idx].buf;
 
@@ -214,6 +212,7 @@ static void *tcp_session_rx_thread_fn(void *arg)
 			(void)nanosleep(&sleep_time, NULL);
 		} else {
 			/* Only read from TCP socket if the TX window is not exceeded */
+			pthread_mutex_unlock(&session_mtx);
 			ret = poll(&fds, 1, 500);
 			if (ret < 0) {
 				fprintf(stderr, "%s: poll errno: %d\n", __func__, errno);
@@ -267,6 +266,11 @@ static void *tcp_session_rx_thread_fn(void *arg)
 			memcpy(rx_buf, &tx_hdr, sizeof(tx_hdr));
 			recv_len += sizeof(tx_hdr);
 
+			/* re-read backlog_offset since acked_seq_nbr might have
+			 * been update during the sleep of this thread. */
+			backlog_offset = session_data->tx_seq_nbr - tx_backlog->acked_seq_nbr - 1;
+			backlog_write_idx =
+				(tx_backlog->first_unacked_idx + backlog_offset) % SESSION_BACKLOG_SIZE;
 			tx_backlog->backlog[backlog_write_idx].buf = malloc(recv_len);
 			tx_backlog->backlog[backlog_write_idx].len = recv_len;
 			memcpy(tx_backlog->backlog[backlog_write_idx].buf, rx_buf, recv_len);
@@ -549,8 +553,12 @@ static void handle_mqtt_message(uint8_t *msg,
 		for (i = tx_backlog->acked_seq_nbr; i < rx_hdr->acked_seq_nbr; i++) {
 			struct tcp_over_mqtt_hdr *tx_hdr =
 				(struct tcp_over_mqtt_hdr *)tx_backlog->backlog[tx_backlog->first_unacked_idx].buf;
-			fprintf(stderr, "%s: Freeing TX backlog: seq no. %4lu\n",
-				__func__, tx_hdr->seq_nbr);
+			if (!tx_backlog->backlog[tx_backlog->first_unacked_idx].buf) {
+				fprintf(stderr, "%s: TX backlog index %d already free'd!\n",
+					__func__, tx_backlog->first_unacked_idx);
+				continue;
+			}
+
 			free(tx_backlog->backlog[tx_backlog->first_unacked_idx].buf);
 			tx_backlog->backlog[tx_backlog->first_unacked_idx].buf = NULL;
 			tx_backlog->backlog[tx_backlog->first_unacked_idx].len = 0xdead;
