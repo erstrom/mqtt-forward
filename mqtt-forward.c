@@ -23,6 +23,12 @@
 #define SESSION_BACKLOG_SIZE 200
 #define TX_WINDOW_LIMIT 100
 
+#define DBG_LOG_(fmt, ...) \
+	do { \
+		if (debug) \
+			printf(fmt, __VA_ARGS__); \
+	} while (0)
+
 struct packet_backlog_data {
 	uint8_t *buf;
 	size_t len;
@@ -73,6 +79,7 @@ static struct tcp_session tcp_sessions[MAX_SESSIONS];
 static struct sockaddr_in *remote_tcp_server_addr;
 static char *old_session_ids[MAX_LIFETIME_SESSIONS];
 static size_t num_old_sessions;
+static bool debug;
 
 static pthread_mutex_t session_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -201,6 +208,10 @@ static void *tcp_session_rx_thread_fn(void *arg)
 				retransmit_tx_hdr->flags = 0;
 			}
 
+			DBG_LOG_("TX RETRANSMIT: %4lu. Acked %4lu\n",
+				 retransmit_tx_hdr->seq_nbr,
+				 retransmit_tx_hdr->acked_seq_nbr);
+
 			ret = mosquitto_publish(g_mqtt_client,
 						NULL,
 						topic,
@@ -226,6 +237,9 @@ static void *tcp_session_rx_thread_fn(void *arg)
 					tx_hdr.acked_seq_nbr =
 						rx_backlog->expected_seq_nbr - 1;
 				}
+				DBG_LOG_("TX HEARTBEAT: %4lu. Acked %4lu\n",
+					 tx_hdr.seq_nbr,
+					 tx_hdr.acked_seq_nbr);
 				ret = mosquitto_publish(g_mqtt_client,
 							NULL,
 							topic,
@@ -275,6 +289,9 @@ static void *tcp_session_rx_thread_fn(void *arg)
 			tx_backlog->backlog[backlog_write_idx].len = recv_len;
 			memcpy(tx_backlog->backlog[backlog_write_idx].buf, rx_buf, recv_len);
 			session_data->tx_seq_nbr++;
+			DBG_LOG_("TX: %4lu. Acked %4lu\n",
+				 tx_hdr.seq_nbr,
+				 tx_hdr.acked_seq_nbr);
 			pthread_mutex_unlock(&session_mtx);
 			ret = mosquitto_publish(g_mqtt_client,
 						NULL,
@@ -538,6 +555,14 @@ static void handle_mqtt_message(uint8_t *msg,
 	rx_backlog = &tcp_sessions[session_nbr].rx_backlog;
 	tx_backlog = &tcp_sessions[session_nbr].tx_backlog;
 
+	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR)
+		DBG_LOG_("RX: %4lu. Remote acked %4lu\n",
+			 rx_hdr->seq_nbr,
+			 rx_hdr->acked_seq_nbr);
+	else
+		DBG_LOG_("RX: %4lu. No remote ack\n",
+			 rx_hdr->seq_nbr);
+
 	pthread_mutex_lock(&session_mtx);
 	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR) {
 		if (rx_hdr->acked_seq_nbr >= tcp_sessions[session_nbr].tx_seq_nbr) {
@@ -571,7 +596,7 @@ static void handle_mqtt_message(uint8_t *msg,
 	pthread_mutex_unlock(&session_mtx);
 
 	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_NO_DATA) {
-		fprintf(stderr, "%s: No data frame received\n", __func__);
+		DBG_LOG_( "%s: No data frame received\n", __func__);
 		return;
 	}
 
@@ -883,8 +908,9 @@ void mqtt_forward_wait(void)
 static void print_usage(char *prog_name)
 {
 	fprintf(stderr, "Usage:\n");
-	fprintf(stderr, "%s [-t] [-s] [-p tcp port] [--client-id client_id] [--mqtt-port mqtt_port] [--mqtt-root-ca rootca] [--mqtt-certificate cert] [--mqtt-private-key privatekey] --mqtt-host mqtt_host --server-side-id server_side_id\n\n", prog_name);
+	fprintf(stderr, "%s [-d] [-t] [-s] [-p tcp port] [--client-id client_id] [--mqtt-port mqtt_port] [--mqtt-root-ca rootca] [--mqtt-certificate cert] [--mqtt-private-key privatekey] --mqtt-host mqtt_host --server-side-id server_side_id\n\n", prog_name);
 	fprintf(stderr, "Optional arguments:\n");
+	fprintf(stderr, "  --debug|-d  Enable debug prints\n");
 	fprintf(stderr, "  --tls|-t    Use MQTT over TLS\n");
 	fprintf(stderr, "  --server|-s Run program on TCP server side\n");
 	fprintf(stderr, "              If not set, program is assumed to run on TCP client side\n");
@@ -911,6 +937,7 @@ int main(int argc, char **argv)
 	int option_index = 0;
 	static struct option long_options[] = {
 		{"help", no_argument, 0, 'h'},
+		{"debug", no_argument, 0, 'd'},
 		{"tls", no_argument, 0, 't'},
 		{"server", no_argument, 0, 's'},
 		{"port", 1, 0, 'p'},
@@ -933,8 +960,11 @@ int main(int argc, char **argv)
 	bool mqtt_certificate_set = false;
 	bool mqtt_private_key_set = false;
 
-	while ((c = getopt_long(argc, argv, "htsa:p:", long_options, &option_index)) != -1) {
+	while ((c = getopt_long(argc, argv, "hdtsa:p:", long_options, &option_index)) != -1) {
 		switch (c) {
+		case 'd':
+			debug = true;
+			break;
 		case 't':
 			use_tls = true;
 			break;
