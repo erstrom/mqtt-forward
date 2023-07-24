@@ -208,7 +208,8 @@ static void *tcp_session_rx_thread_fn(void *arg)
 				retransmit_tx_hdr->flags = 0;
 			}
 
-			DBG_LOG_("TX RETRANSMIT: %4lu. Acked %4lu\n",
+			DBG_LOG_("Session %s: TX RETRANSMIT: %4lu. Acked %4lu\n",
+				 session_data->session_id,
 				 retransmit_tx_hdr->seq_nbr,
 				 retransmit_tx_hdr->acked_seq_nbr);
 
@@ -237,7 +238,8 @@ static void *tcp_session_rx_thread_fn(void *arg)
 					tx_hdr.acked_seq_nbr =
 						rx_backlog->expected_seq_nbr - 1;
 				}
-				DBG_LOG_("TX HEARTBEAT: %4lu. Acked %4lu\n",
+				DBG_LOG_("Session %s: TX HEARTBEAT: %4lu. Acked %4lu\n",
+					 session_data->session_id,
 					 tx_hdr.seq_nbr,
 					 tx_hdr.acked_seq_nbr);
 				ret = mosquitto_publish(g_mqtt_client,
@@ -285,11 +287,18 @@ static void *tcp_session_rx_thread_fn(void *arg)
 			backlog_offset = session_data->tx_seq_nbr - tx_backlog->acked_seq_nbr - 1;
 			backlog_write_idx =
 				(tx_backlog->first_unacked_idx + backlog_offset) % SESSION_BACKLOG_SIZE;
+			if (tx_backlog->backlog[backlog_write_idx].buf) {
+				fprintf(stderr, "Session: %s: Backlog index %d already has an allocated buffer!\n",
+					session_data->session_id,
+					backlog_write_idx);
+				free(tx_backlog->backlog[backlog_write_idx].buf);
+			}
 			tx_backlog->backlog[backlog_write_idx].buf = malloc(recv_len);
 			tx_backlog->backlog[backlog_write_idx].len = recv_len;
 			memcpy(tx_backlog->backlog[backlog_write_idx].buf, rx_buf, recv_len);
 			session_data->tx_seq_nbr++;
-			DBG_LOG_("TX: %4lu. Acked %4lu\n",
+			DBG_LOG_("Session %s: TX: %4lu. Acked %4lu\n",
+				 session_data->session_id,
 				 tx_hdr.seq_nbr,
 				 tx_hdr.acked_seq_nbr);
 			pthread_mutex_unlock(&session_mtx);
@@ -556,11 +565,13 @@ static void handle_mqtt_message(uint8_t *msg,
 	tx_backlog = &tcp_sessions[session_nbr].tx_backlog;
 
 	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR)
-		DBG_LOG_("RX: %4lu. Remote acked %4lu\n",
+		DBG_LOG_("Session %s: RX: %4lu. Remote acked %4lu\n",
+			 tcp_sessions[session_nbr].session_id,
 			 rx_hdr->seq_nbr,
 			 rx_hdr->acked_seq_nbr);
 	else
-		DBG_LOG_("RX: %4lu. No remote ack\n",
+		DBG_LOG_("Session %s: RX: %4lu. No remote ack\n",
+			 tcp_sessions[session_nbr].session_id,
 			 rx_hdr->seq_nbr);
 
 	pthread_mutex_lock(&session_mtx);
@@ -596,7 +607,8 @@ static void handle_mqtt_message(uint8_t *msg,
 	pthread_mutex_unlock(&session_mtx);
 
 	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_NO_DATA) {
-		DBG_LOG_( "%s: No data frame received\n", __func__);
+		DBG_LOG_("Session %s: No data frame received\n",
+			 tcp_sessions[session_nbr].session_id);
 		return;
 	}
 
