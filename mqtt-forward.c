@@ -92,6 +92,7 @@ static char mqtt_host[100];
 static char mqtt_root_ca[100];
 static char mqtt_certificate[100];
 static char mqtt_private_key[100];
+static char tcp_server_addr[100];
 
 static void clear_rx_packet_backlog(struct rx_packet_backlog *rx_backlog)
 {
@@ -809,7 +810,7 @@ int mqtt_forward_init()
 	char *client_id = server_mode ? server_mqtt_id : client_mqtt_id;
 
 	if (server_mode) {
-		ret = getaddrinfo("127.0.0.1",
+		ret = getaddrinfo(tcp_server_addr,
 				  NULL,
 				  &addrhint,
 				  &hostaddrinfo);
@@ -930,6 +931,8 @@ static void print_usage(char *prog_name)
 	fprintf(stderr, "              If -s flag was set, the TCP port refers to the local TCP server port. The program will connect to this port in this case\n");
 	fprintf(stderr, "              If -s flag was not set, the TCP port refers to the remote TCP server port. The program will listen to this port in this case\n");
 	fprintf(stderr, "              If not set, a default port of 22 will be used\n");
+	fprintf(stderr, "  --addr|-a   Address of TCP server (IP address of domain name). Only applicable if --server was used\n");
+	fprintf(stderr, "              If not set, a default address of 127.0.0.1 will be used\n");
 	fprintf(stderr, "  --client-id MQTT client id. Must be set unless --server was used\n");
 	fprintf(stderr, "  --mqtt-port port for MQTT broker.\n");
 	fprintf(stderr, "              A default value of 1883 will be used if --tls was not set. 8883 will be used if --tls was set \n");
@@ -953,6 +956,7 @@ int main(int argc, char **argv)
 		{"tls", no_argument, 0, 't'},
 		{"server", no_argument, 0, 's'},
 		{"port", 1, 0, 'p'},
+		{"addr", 1, 0, 'a'},
 		{"client-id", 1, 0, 1005},
 		{"server-side-id", 1, 0, 1006},
 		{"mqtt-host", 1, 0, 1001},
@@ -971,6 +975,7 @@ int main(int argc, char **argv)
 	bool mqtt_root_ca_set = false;
 	bool mqtt_certificate_set = false;
 	bool mqtt_private_key_set = false;
+	bool tcp_server_addr_set = false;;
 
 	while ((c = getopt_long(argc, argv, "hdtsa:p:", long_options, &option_index)) != -1) {
 		switch (c) {
@@ -994,6 +999,10 @@ int main(int argc, char **argv)
 		case 'p':
 			port = strtol(optarg, NULL, 10);
 			tcp_port_set = true;
+			break;
+		case 'a':
+			strcpy(tcp_server_addr, optarg);
+			tcp_server_addr_set = true;
 			break;
 		case 1000:
 			mqtt_port = strtol(optarg, NULL, 10);
@@ -1038,6 +1047,11 @@ int main(int argc, char **argv)
 	if (!mqtt_port_set) {
 		mqtt_port = use_tls ? 8883 : 1883;
 		fprintf(stderr, "Missing MQTT port. Using default port %d\n", mqtt_port);
+	}
+
+	if (server_mode && !tcp_server_addr_set) {
+		strcpy(tcp_server_addr, "127.0.0.1");
+		fprintf(stderr, "Missing server address. Using default addr %s\n", tcp_server_addr);
 	}
 
 	if (!mqtt_host_set) {
