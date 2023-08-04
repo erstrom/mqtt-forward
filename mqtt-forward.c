@@ -22,6 +22,7 @@
 #define SESSION_RX_BUF_SIZE 10000
 #define SESSION_BACKLOG_SIZE 200
 #define TX_WINDOW_LIMIT 100
+#define MAX_SERVER_LIST 30
 
 #define DBG_LOG_(fmt, ...) \
 	do { \
@@ -62,24 +63,34 @@ struct tcp_over_mqtt_hdr {
 #define TCP_OVER_MQTT_FLAG_TCP_DISCONNECT (1)
 #define TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR (2)
 #define TCP_OVER_MQTT_FLAG_NO_DATA (4)
+#define TCP_OVER_MQTT_FLAG_BEACON (8)
 	uint32_t flags;
 	uint32_t pad;
 } __attribute__((packed));
+
+struct tcp_server_list {
+	char *server_id;
+	time_t last_seen_time;
+};
 
 static int tcp_client_listen_sock;
 static int tcp_client_listen_port;
 static int tcp_server_connect_port;
 static pthread_t tcp_accept_thread;
+static pthread_t beacon_tx_thread;
 static pthread_t mqtt_create_thread;
 static pthread_t tcp_rx_threads[MAX_SESSIONS];
 static struct mosquitto *g_mqtt_client;
 static bool connected_to_mqtt_server;
 static bool server_mode;
+static bool list_servers;
+static bool transmit_beacons;
 static struct tcp_session tcp_sessions[MAX_SESSIONS];
 static struct sockaddr_in *remote_tcp_server_addr;
 static char *old_session_ids[MAX_LIFETIME_SESSIONS];
 static size_t num_old_sessions;
 static bool debug;
+static struct tcp_server_list server_list[MAX_SESSIONS];
 
 static pthread_mutex_t session_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -506,10 +517,84 @@ static void *create_thread_fn(void *arg)
 	return NULL;
 }
 
+static void *beacon_tx_thread_fn(void *arg)
+{
+	struct timespec ts = {.tv_sec = 3};
+	struct tcp_over_mqtt_hdr msg_hdr = {.flags = TCP_OVER_MQTT_FLAG_BEACON};
+	char topic[200];
+
+	snprintf(topic, sizeof(topic), "ssh/%s/beacon/rx", server_mqtt_id);
+
+	for (;;) {
+		if (!connected_to_mqtt_server) {
+			(void)nanosleep(&ts, NULL);
+			continue;
+		}
+
+		(void)mosquitto_publish(g_mqtt_client,
+					NULL,
+					topic,
+					sizeof(msg_hdr),
+					&msg_hdr,
+					mqtt_qos,
+					false /*retain*/);
+		(void)nanosleep(&ts, NULL);
+	}
+
+	return NULL;
+}
+
+static void handle_mqtt_message_list_servers(const char *recvd_client_id,
+					     size_t recvd_client_id_len)
+{
+	size_t server_nbr;
+	time_t cur_time;
+
+	cur_time = time(NULL);
+
+	/* Add the server to the server list */
+	for (server_nbr = 0; server_nbr < MAX_SERVER_LIST; server_nbr++) {
+		if (!server_list[server_nbr].server_id) {
+			server_list[server_nbr].server_id =
+				calloc(recvd_client_id_len + 1, 1);
+			strncpy(server_list[server_nbr].server_id,
+				recvd_client_id,
+				recvd_client_id_len);
+			server_list[server_nbr].last_seen_time = cur_time;
+			break;
+		}
+
+		if (strncmp(server_list[server_nbr].server_id,
+			    recvd_client_id,
+			    recvd_client_id_len) == 0) {
+			server_list[server_nbr].last_seen_time = cur_time;
+			break;
+		}
+	}
+
+	if (server_nbr >= MAX_SERVER_LIST)
+		fprintf(stderr, "Server list exhausted!\n");
+
+	/* Print the server list */
+	printf("Detected servers:\n\n");
+	printf("  %40s%30s\n\n", "Server ID", "Last seen (seconds ago)");
+	for (server_nbr = 0; server_nbr < MAX_SERVER_LIST; server_nbr++) {
+		if (!server_list[server_nbr].server_id)
+			break;
+
+		printf("  %40s%30ld\n",
+		       server_list[server_nbr].server_id,
+		       cur_time - server_list[server_nbr].last_seen_time);
+	}
+	printf("\n\n");
+}
+
 static void handle_mqtt_message(uint8_t *msg,
 				int msg_len,
 				const char *session_id,
 				size_t session_id_len,
+				const char *recvd_client_id,
+				size_t recvd_client_id_len,
 				bool server_session)
 {
 	int ret;
@@ -524,6 +609,14 @@ static void handle_mqtt_message(uint8_t *msg,
 	size_t session_nbr;
 
 	rx_hdr = (struct tcp_over_mqtt_hdr *) msg;
+
+	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_BEACON) {
+		if (list_servers)
+			handle_mqtt_message_list_servers(recvd_client_id,
+							 recvd_client_id_len);
+
+		return;
+	}
 
 	/* Check if there is a session for this session ID */
 	for (session_nbr = 0; session_nbr < MAX_SESSIONS; session_nbr++) {
@@ -686,6 +779,7 @@ static void on_message(struct mosquitto *mosq,
 	char *msg_name;
 	char *client_id;
 	char *session_id;
+	ssize_t client_id_len;
 	ssize_t session_id_len;
 
 	(void)mosq;
@@ -706,6 +800,8 @@ static void on_message(struct mosquitto *mosq,
 		return;
 	}
 	session_id++; /* Skip leading '/' */
+
+	client_id_len = session_id - client_id - 1;
 
 	msg_name = strchr(session_id, '/');
 	if (!msg_name) {
@@ -731,6 +827,8 @@ static void on_message(struct mosquitto *mosq,
 				    message->payloadlen,
 				    session_id,
 				    session_id_len,
+				    client_id,
+				    client_id_len,
 				    server_mode);
 	} else {
 		fprintf(stderr, "%s: %s: unsupported topic: %s\n",
@@ -772,6 +870,20 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc)
 			 200,
 			 "ssh/%s/+/tx",
 			 server_mqtt_id);
+
+		ret = mosquitto_subscribe(g_mqtt_client,
+					  &mid,
+					  topic,
+					  mqtt_qos);
+		if (ret) {
+			fprintf(stderr, "%s: mosquitto_subscribe %d (failed to subscribe to topic %s)\n",
+				__func__, ret, topic);
+
+		}
+	} else if (list_servers) {
+		snprintf(topic,
+			 200,
+			 "ssh/+/beacon/rx");
 
 		ret = mosquitto_subscribe(g_mqtt_client,
 					  &mid,
@@ -900,9 +1012,19 @@ int mqtt_forward_start(void)
 				     &tcp_accept_thread_fn,
 				     NULL);
 		if (ret) {
-			fprintf(stderr, "%s: pthread_create %d\n", __func__, errno);
+			fprintf(stderr, "%s: TCP accept: pthread_create %d\n", __func__, errno);
 			goto err;
 		}
+	} else if (transmit_beacons) {
+		ret = pthread_create(&beacon_tx_thread,
+				     NULL,
+				     &beacon_tx_thread_fn,
+				     NULL);
+		if (ret) {
+			fprintf(stderr, "%s: Beacon: pthread_create %d\n", __func__, errno);
+			goto err;
+		}
+
 	}
 
 	return 0;
@@ -939,6 +1061,10 @@ static void print_usage(char *prog_name)
 	fprintf(stderr, "  --mqtt-root-ca  root ca for MQTT broker. Only appicable if --tls was set\n");
 	fprintf(stderr, "  --mqtt-certificate  certificate for authentication with MQTT broker. Only appicable if --tls was set\n");
 	fprintf(stderr, "  --mqtt-private-key  private key for certificate. Only appicable if --tls was set\n");
+	fprintf(stderr, "  --beacon|-b Transmit beacon frames continuosly.\n");
+	fprintf(stderr, "              Only applicable for server side (i.e. --server was used).\n");
+	fprintf(stderr, "  --list-server|-l  List available servers (provided that the servers are transmitting beacon messages).\n");
+	fprintf(stderr, "                    Only applicable for client side (i.e. --server was not used).\n");
 	fprintf(stderr, "Mandatory arguments:\n");
 	fprintf(stderr, "  --mqtt-host       The host name of the MQTT broker\n");
 	fprintf(stderr, "  --server-side-id  A unique string identifying the server side program.\n");
@@ -955,6 +1081,8 @@ int main(int argc, char **argv)
 		{"debug", no_argument, 0, 'd'},
 		{"tls", no_argument, 0, 't'},
 		{"server", no_argument, 0, 's'},
+		{"list-servers", no_argument, 0, 'l'},
+		{"beacon", no_argument, 0, 'b'},
 		{"port", 1, 0, 'p'},
 		{"addr", 1, 0, 'a'},
 		{"client-id", 1, 0, 1005},
@@ -977,7 +1105,7 @@ int main(int argc, char **argv)
 	bool mqtt_private_key_set = false;
 	bool tcp_server_addr_set = false;;
 
-	while ((c = getopt_long(argc, argv, "hdtsa:p:", long_options, &option_index)) != -1) {
+	while ((c = getopt_long(argc, argv, "hdtslba:p:", long_options, &option_index)) != -1) {
 		switch (c) {
 		case 'd':
 			debug = true;
@@ -987,6 +1115,12 @@ int main(int argc, char **argv)
 			break;
 		case 's':
 			server_mode = true;
+			break;
+		case 'l':
+			list_servers = true;
+			break;
+		case 'b':
+			transmit_beacons = true;
 			break;
 		case 1005:
 			strcpy(client_mqtt_id, optarg);
