@@ -40,7 +40,7 @@ On network B, run mqtt-forward in server mode::
 
 On network A, run mqtt-forward in client mode::
 
-    mqtt-forward --port 1234 --client-id my-client --mqtt-host path.to.mqtt-broker --server-side-id my-server-id
+    mqtt-forward --port 1234 --mqtt-host path.to.mqtt-broker --server-side-id my-server-id
 
 On network A, run the ssh client::
 
@@ -65,7 +65,7 @@ On network B, run mqtt-forward in server mode::
 
 On network A, run mqtt-forward in client mode::
 
-    mqtt-forward --port 1234 --client-id my-client --mqtt-host path.to.mqtt-broker --server-side-id my-server-id \
+    mqtt-forward --port 1234 --mqtt-host path.to.mqtt-broker --server-side-id my-server-id \
         --tls \
         --mqtt-root-ca root_ca.pem \
         --mqtt-certificate cert.pem \

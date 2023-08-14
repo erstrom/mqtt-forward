@@ -144,14 +144,14 @@ static void clear_session(struct tcp_session *session_data)
 	pthread_mutex_unlock(&session_mtx);
 }
 
-static char *gen_session_id()
+static char *gen_random_id(size_t n_nibbles)
 {
 	FILE *fp;
 	int i;
-	uint8_t id[16];
+	uint8_t *id;
 	uint8_t nibble_1st;
 	uint8_t nibble_2nd;
-	char *session_id;
+	char *random_id;
 
 	fp = fopen("/dev/urandom", "rb");
 	if (!fp) {
@@ -159,22 +159,39 @@ static char *gen_session_id()
 		return NULL;
 	}
 
-	session_id = calloc(32+1, 1);
+	random_id = calloc(n_nibbles+1, 1);
+	id = calloc(n_nibbles/2, 1);
 
-	(void)fread(id, 1, 16, fp);
+	(void)fread(id, 1, n_nibbles/2, fp);
 
-	for (i = 0; i < 16; i++) {
+	for (i = 0; i < n_nibbles/2; i++) {
 		nibble_1st = (id[i] & 0xf0) >> 4;
 		nibble_2nd = id[i] & 0x0f;
 		nibble_1st = (nibble_1st > 9) ? (nibble_1st - 10 + 'a') : (nibble_1st + '0');
 		nibble_2nd = (nibble_2nd > 9) ? (nibble_2nd - 10 + 'a') : (nibble_2nd + '0');
-		session_id[2*i] = nibble_1st;
-		session_id[2*i+1] = nibble_2nd;
+		random_id[2*i] = nibble_1st;
+		random_id[2*i+1] = nibble_2nd;
 	}
 
+	free(id);
 	fclose(fp);
 
-	return session_id;
+	return random_id;
+}
+
+static void gen_client_id()
+{
+	char *random_id;
+
+	random_id = gen_random_id(12);
+
+	snprintf(client_mqtt_id, sizeof(client_mqtt_id), "mqtt-forward-%s", random_id);
+	free(random_id);
+}
+
+static char *gen_session_id()
+{
+	return gen_random_id(32);
 }
 
 static void *tcp_session_rx_thread_fn(void *arg)
@@ -1055,7 +1072,8 @@ static void print_usage(char *prog_name)
 	fprintf(stderr, "              If not set, a default port of 22 will be used\n");
 	fprintf(stderr, "  --addr|-a   Address of TCP server (IP address of domain name). Only applicable if --server was used\n");
 	fprintf(stderr, "              If not set, a default address of 127.0.0.1 will be used\n");
-	fprintf(stderr, "  --client-id MQTT client id. Must be set unless --server was used\n");
+	fprintf(stderr, "  --client-id MQTT client id. Used as MQTT client id if --server was not used used\n");
+	fprintf(stderr, "              If not set, a random client id will be used\n");
 	fprintf(stderr, "  --mqtt-port port for MQTT broker.\n");
 	fprintf(stderr, "              A default value of 1883 will be used if --tls was not set. 8883 will be used if --tls was set \n");
 	fprintf(stderr, "  --mqtt-root-ca  root ca for MQTT broker. Only appicable if --tls was set\n");
@@ -1171,8 +1189,8 @@ int main(int argc, char **argv)
 	}
 
 	if (!server_mode && ! client_id_set) {
-		fprintf(stderr, "Missing client ID (must be set in client mode)\n");
-		return -1;
+		gen_client_id();
+		fprintf(stderr, "Missing client ID. Using random ID: %s\n", client_mqtt_id);
 	}
 
 	if (!tcp_port_set)
