@@ -75,6 +75,25 @@ On network A, run the ssh client::
 
     ssh -p 1234 user@localhost
 
+Using environment variables
++++++++++++++++++++++++++++
+
+Environment variables can be used to configure some of the settings.
+This is useful in order to avoid having to type that much on the command line.
+
+Here is an example. Variables have been exported in a text file::
+
+    cat mqtt-forward-env
+    export MQTT_FORWARD_MQTT_HOST=path.to.mqtt-broker
+    export MQTT_FORWARD_ROOT_CA=/path/to/root_ca.pem
+    export MQTT_FORWARD_CERTIFICATE=/path/to/cert.pem
+    export MQTT_FORWARD_PRIVATE_KEY=/path/to/private_key.pem
+
+Source the environment setup file once and run the program::
+
+    . mqtt-forward-env
+    mqtt-forward --server-side-id my-server-id -p 1234
+
 Build
 -----
 

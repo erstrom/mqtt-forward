@@ -30,6 +30,11 @@
 			printf(fmt, __VA_ARGS__); \
 	} while (0)
 
+#define ENV_VAR_MQTT_HOST   "MQTT_FORWARD_MQTT_HOST"
+#define ENV_VAR_ROOT_CA     "MQTT_FORWARD_ROOT_CA"
+#define ENV_VAR_CERTIFICATE "MQTT_FORWARD_CERTIFICATE"
+#define ENV_VAR_PRIVATE_KEY "MQTT_FORWARD_PRIVATE_KEY"
+
 struct packet_backlog_data {
 	uint8_t *buf;
 	size_t len;
@@ -1060,7 +1065,16 @@ void mqtt_forward_wait(void)
 static void print_usage(char *prog_name)
 {
 	fprintf(stderr, "Usage:\n");
-	fprintf(stderr, "%s [-d] [-t] [-s] [-p tcp port] [--client-id client_id] [--mqtt-port mqtt_port] [--mqtt-root-ca rootca] [--mqtt-certificate cert] [--mqtt-private-key privatekey] --mqtt-host mqtt_host --server-side-id server_side_id\n\n", prog_name);
+	fprintf(stderr, "%s [-d] [-t] [-s] [-p tcp port] [--client-id client_id] [--mqtt-port mqtt_port] [--mqtt-root-ca rootca] [--mqtt-certificate cert] [--mqtt-private-key privatekey] --mqtt-host mqtt_host --server-side-id server_side_id\n", prog_name);
+	fprintf(stderr, "\n");
+	fprintf(stderr, "Some of the options can be set with environment variables.\n");
+	fprintf(stderr, "Available environment variables are:\n");
+	fprintf(stderr, "  MQTT_FORWARD_MQTT_HOST       See option --mqtt-host\n");
+	fprintf(stderr, "  MQTT_FORWARD_ROOT_CA         See option --mqtt-private-key\n");
+	fprintf(stderr, "  MQTT_FORWARD_CERTIFICATE     See option --mqtt-certificate\n");
+	fprintf(stderr, "  MQTT_FORWARD_PRIVATE_KEY     See option --mqtt-private-key\n");
+	fprintf(stderr, "The environment variables will be overridden by command line options.\n");
+	fprintf(stderr, "\n");
 	fprintf(stderr, "Optional arguments:\n");
 	fprintf(stderr, "  --debug|-d  Enable debug prints\n");
 	fprintf(stderr, "  --tls|-t    Use MQTT over TLS\n");
@@ -1122,6 +1136,28 @@ int main(int argc, char **argv)
 	bool mqtt_certificate_set = false;
 	bool mqtt_private_key_set = false;
 	bool tcp_server_addr_set = false;;
+	char *env_var;
+
+	/* Check environment variables before reading command line options*/
+	if ((env_var = getenv(ENV_VAR_MQTT_HOST))) {
+		strcpy(mqtt_host, env_var);
+		mqtt_host_set = true;
+	}
+	if ((env_var = getenv(ENV_VAR_ROOT_CA))) {
+		strcpy(mqtt_root_ca, env_var);
+		mqtt_root_ca_set = true;
+		use_tls = true;
+	}
+	if ((env_var = getenv(ENV_VAR_CERTIFICATE))) {
+		strcpy(mqtt_certificate, env_var);
+		mqtt_certificate_set = true;
+		use_tls = true;
+	}
+	if ((env_var = getenv(ENV_VAR_PRIVATE_KEY))) {
+		strcpy(mqtt_private_key, env_var);
+		mqtt_private_key_set = true;
+		use_tls = true;
+	}
 
 	while ((c = getopt_long(argc, argv, "hdtslba:p:", long_options, &option_index)) != -1) {
 		switch (c) {
