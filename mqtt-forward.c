@@ -1106,6 +1106,7 @@ static void print_usage(char *prog_name)
 
 int main(int argc, char **argv)
 {
+	int ret;
 	int c;
 	int option_index = 0;
 	static struct option long_options[] = {
@@ -1267,8 +1268,12 @@ int main(int argc, char **argv)
 	else
 		tcp_client_listen_port = port;
 
-	mqtt_forward_init();
+	ret = mqtt_forward_init();
+	if (ret < 0)
+		return -1;
 	mqtt_forward_start();
+	if (ret < 0)
+		return -1;
 	mqtt_forward_wait();
 
 	return 0;
