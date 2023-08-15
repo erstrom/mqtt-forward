@@ -82,6 +82,7 @@ static int tcp_client_listen_sock;
 static int tcp_client_listen_port;
 static int tcp_server_connect_port;
 static pthread_t tcp_accept_thread;
+static pthread_t beacon_print_thread;
 static pthread_t beacon_tx_thread;
 static pthread_t mqtt_create_thread;
 static pthread_t tcp_rx_threads[MAX_SESSIONS];
@@ -98,6 +99,7 @@ static bool debug;
 static struct tcp_server_list server_list[MAX_SESSIONS];
 
 static pthread_mutex_t session_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t server_list_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static bool use_tls;
 static char server_mqtt_id[100];
@@ -566,12 +568,44 @@ static void *beacon_tx_thread_fn(void *arg)
 	return NULL;
 }
 
+static void *beacon_print_thread_fn(void *arg)
+{
+	size_t server_nbr;
+	time_t cur_time;
+	struct timespec ts = {.tv_sec = 3};
+
+	for (;;) {
+		(void)nanosleep(&ts, NULL);
+
+		pthread_mutex_lock(&server_list_mtx);
+		cur_time = time(NULL);
+
+		/* Print the server list */
+		printf("Detected servers:\n\n");
+		printf("  %40s%30s\n\n", "Server ID", "Last seen (seconds ago)");
+
+		for (server_nbr = 0; server_nbr < MAX_SERVER_LIST; server_nbr++) {
+			if (!server_list[server_nbr].server_id)
+				break;
+
+			printf("  %40s%30ld\n",
+			       server_list[server_nbr].server_id,
+			       cur_time - server_list[server_nbr].last_seen_time);
+		}
+		printf("\n\n");
+		pthread_mutex_unlock(&server_list_mtx);
+	}
+
+	return NULL;
+}
+
 static void handle_mqtt_message_list_servers(const char *recvd_client_id,
 					     size_t recvd_client_id_len)
 {
 	size_t server_nbr;
 	time_t cur_time;
 
+	pthread_mutex_lock(&server_list_mtx);
 	cur_time = time(NULL);
 
 	/* Add the server to the server list */
@@ -594,21 +628,10 @@ static void handle_mqtt_message_list_servers(const char *recvd_client_id,
 		}
 	}
 
+	pthread_mutex_unlock(&server_list_mtx);
+
 	if (server_nbr >= MAX_SERVER_LIST)
 		fprintf(stderr, "Server list exhausted!\n");
-
-	/* Print the server list */
-	printf("Detected servers:\n\n");
-	printf("  %40s%30s\n\n", "Server ID", "Last seen (seconds ago)");
-	for (server_nbr = 0; server_nbr < MAX_SERVER_LIST; server_nbr++) {
-		if (!server_list[server_nbr].server_id)
-			break;
-
-		printf("  %40s%30ld\n",
-		       server_list[server_nbr].server_id,
-		       cur_time - server_list[server_nbr].last_seen_time);
-	}
-	printf("\n\n");
 }
 
 static void handle_mqtt_message(uint8_t *msg,
@@ -955,7 +978,7 @@ int mqtt_forward_init()
 
 		remote_tcp_server_addr = (struct sockaddr_in *)hostaddrinfo->ai_addr;
 		remote_tcp_server_addr->sin_port = htons(22);
-	} else {
+	} else if (!list_servers) {
 		tcp_client_listen_sock = socket(AF_INET, SOCK_STREAM, 0);
 		if (tcp_client_listen_sock < 0)
 			goto err;
@@ -1028,13 +1051,22 @@ int mqtt_forward_start(void)
 		goto err;
 	}
 
-	if (!server_mode) {
+	if (!server_mode && !list_servers) {
 		ret = pthread_create(&tcp_accept_thread,
 				     NULL,
 				     &tcp_accept_thread_fn,
 				     NULL);
 		if (ret) {
 			fprintf(stderr, "%s: TCP accept: pthread_create %d\n", __func__, errno);
+			goto err;
+		}
+	} else if (!server_mode && list_servers) {
+		ret = pthread_create(&beacon_print_thread,
+				     NULL,
+				     &beacon_print_thread_fn,
+				     NULL);
+		if (ret) {
+			fprintf(stderr, "%s: Server print thread: pthread_create %d\n", __func__, errno);
 			goto err;
 		}
 	} else if (transmit_beacons) {
@@ -1058,6 +1090,8 @@ void mqtt_forward_wait(void)
 {
 	if (server_mode)
 		(void)pthread_join(mqtt_create_thread, NULL);
+	else if (list_servers)
+		(void)pthread_join(beacon_print_thread, NULL);
 	else
 		(void)pthread_join(tcp_accept_thread, NULL);
 }
@@ -1220,7 +1254,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (!server_id_set) {
+	if (!server_id_set && (server_mode || !list_servers)) {
 		fprintf(stderr, "Missing server ID\n");
 		return -1;
 	}
@@ -1230,7 +1264,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Missing client ID. Using random ID: %s\n", client_mqtt_id);
 	}
 
-	if (!tcp_port_set)
+	if (!tcp_port_set && !list_servers)
 		fprintf(stderr, "Missing TCP port. Using default port %d\n", port);
 
 	if (!mqtt_port_set) {
