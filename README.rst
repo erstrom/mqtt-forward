@@ -29,6 +29,10 @@ All data received from MQTT will be sent to the server on the local connection.
 The client side instance will open a TCP server on network A that the TCP client can connect to.
 All data received on the local TCP server will be forwarded to the remote side via MQTT.
 
+The tool supports packet re-ordering and retransmissions in order to have reliable communication between both peers.
+This is especially important for MQTT QoS levels 0 and 1.
+MQTT does not guarantee that packets are being received in the same order they are sent, even at QoS level 2.
+
 Simple usage example
 --------------------
 
@@ -98,6 +102,10 @@ Build
 -----
 
 mqtt-forward requires both mosquitto library and openssl
+
+On debian and ubuntu, the necessary packets needed for building can be installed like this::
+
+    sudo apt install libmosquitto-dev libssl-dev
 
 Build with cmake::
 
