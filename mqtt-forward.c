@@ -1127,6 +1127,8 @@ static void print_usage(char *prog_name)
 	fprintf(stderr, "  --mqtt-root-ca  root ca for MQTT broker. Only appicable if --tls was set\n");
 	fprintf(stderr, "  --mqtt-certificate  certificate for authentication with MQTT broker. Only appicable if --tls was set\n");
 	fprintf(stderr, "  --mqtt-private-key  private key for certificate. Only appicable if --tls was set\n");
+	fprintf(stderr, "  --mqtt-qos  QoS level for MQTT.\n");
+	fprintf(stderr, "              A default Qos of 1 will be used if omitted \n");
 	fprintf(stderr, "  --beacon|-b Transmit beacon frames continuosly.\n");
 	fprintf(stderr, "              Only applicable for server side (i.e. --server was used).\n");
 	fprintf(stderr, "  --list-server|-l  List available servers (provided that the servers are transmitting beacon messages).\n");
@@ -1159,6 +1161,7 @@ int main(int argc, char **argv)
 		{"mqtt-root-ca", 1, 0, 1002},
 		{"mqtt-certificate", 1, 0, 1003},
 		{"mqtt-private-key", 1, 0, 1004},
+		{"mqtt-qos", 1, 0, 1007},
 		{0, 0, 0, 0}
 	};
 	int port = 22;
@@ -1171,6 +1174,7 @@ int main(int argc, char **argv)
 	bool mqtt_certificate_set = false;
 	bool mqtt_private_key_set = false;
 	bool tcp_server_addr_set = false;;
+	bool mqtt_qos_set = false;
 	char *env_var;
 
 	/* Check environment variables before reading command line options*/
@@ -1247,6 +1251,10 @@ int main(int argc, char **argv)
 			strcpy(mqtt_private_key, optarg);
 			mqtt_private_key_set = true;
 			break;
+		case 1007:
+			mqtt_qos = strtol(optarg, NULL, 10);
+			mqtt_qos_set = true;
+			break;
 		case 'h':
 		default:
 			print_usage(argv[0]);
@@ -1276,6 +1284,9 @@ int main(int argc, char **argv)
 		strcpy(tcp_server_addr, "127.0.0.1");
 		fprintf(stderr, "Missing server address. Using default addr %s\n", tcp_server_addr);
 	}
+
+	if (!mqtt_qos_set)
+		fprintf(stderr, "Missing MQTT QoS. Using default QoS %d\n", mqtt_qos);
 
 	if (!mqtt_host_set) {
 		fprintf(stderr, "Missing MQTT host\n");
