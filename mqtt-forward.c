@@ -977,7 +977,7 @@ int mqtt_forward_init()
 		}
 
 		remote_tcp_server_addr = (struct sockaddr_in *)hostaddrinfo->ai_addr;
-		remote_tcp_server_addr->sin_port = htons(22);
+		remote_tcp_server_addr->sin_port = htons(tcp_server_connect_port);
 	} else if (!list_servers) {
 		tcp_client_listen_sock = socket(AF_INET, SOCK_STREAM, 0);
 		if (tcp_client_listen_sock < 0)
