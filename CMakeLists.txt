@@ -32,7 +32,7 @@ target_include_directories(${TARGET_MQTT_FORWARD} PRIVATE ${include_paths})
 target_link_libraries(${TARGET_MQTT_FORWARD} pthread mosquitto ssl crypto)
 
 install(TARGETS "${TARGET_MQTT_FORWARD}"
-		DESTINATION bin
+		DESTINATION usr/bin
 	   )
 
 # vim: set ts=4 sw=4 sts=4 et smarttab :
