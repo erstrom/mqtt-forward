@@ -54,6 +54,8 @@ If mqtt-forward is not run on the same computer as the ssh client on network A, 
 
 Note that both client and server side mqtt-forward instances must use the same --server-side-id in order to establish a connection!
 
+For more detailed usage examples, se section *Usage examples* below.
+
 Secure connection example
 -------------------------
 
@@ -113,5 +115,123 @@ Build with cmake::
     cd build
     cmake ..
     make
+    sudo make install
     cd -
 
+Usage examples
+--------------
+
+This section contains some more detailed examples of how to use mqtt-forward.
+
+Setup unsecure MQTT broker on debian/ubuntu
++++++++++++++++++++++++++++++++++++++++++++
+
+In order to use mqtt-forward there must be an mqtt broker available that the program can connect to.
+
+All below commands should be run as root user.
+
+Install the mosquitto broker like this::
+
+    apt install mosquitto
+
+Update the config to allow anonymous access::
+
+    cat > /etc/mosquitto/conf.d/mosquitto.conf <<- EOM
+    listener 1883
+    require_certificate false
+    allow_anonymous true
+    EOM
+
+Restart mosquitto in order to make the new settings effective::
+
+    systemctl restart mosquitto
+
+Setup server side program for SSH access
+++++++++++++++++++++++++++++++++++++++++
+
+Let's assume that the broker that was installed in the previous example has a public IP address and is accessible over internet.
+Let's also assume that it was installed on a computer with domain name *some-domain.se*
+
+We have a computer on a private NAT network that we want to have SSH access to.
+Since the computer is on a NAT network it does not have a public IP address of its own and thus, it can't be accessed from the internet
+(programs on the computer can only connect to servers on the internet).
+
+mqtt-forward solves this by tunneling the TCP traffic via the mqtt broker on some-domain.se
+
+Build mqtt-forward according to the build instructions above and install on the computer on the private network we want to have SSH access to.
+
+We want to have mqtt-forward running as a service in the background, so we create a systemd unit file.
+
+Here is an example::
+
+    cat > /etc/systemd/system/mqtt-forward.service <<- EOM
+    [Unit]
+    Description=mqtt-forward
+    After=network-online.target
+
+    [Service]
+    User=1000
+    Group=1000
+    ExecStart=/usr/bin/mqtt-forward --mqtt-host some-domain.se --server-side-id my-server-id -s -b
+    # Automatically restart the service if it crashes
+    Restart=on-failure
+    Type=simple
+
+    [Install]
+
+    # Tell systemd to automatically start this service when the system boots
+    # (assuming the service is enabled)
+    WantedBy=multi-user.target
+    EOM
+
+The above unit file will start an instance of mqtt-forward with server side id "my-server-id".
+It will connect to MQTT broker some-domain.se on port 1883. The port was not specified on the command line since it is the default port.
+The -b flag tells mqtt-forward to broadcast its precence to the broker so clients can detect if it is available.
+The -s flag is used to run the program in server mode.
+Since no address or port options were specified, default values will be used.
+These are "127.0.0.1" for the address and "22" for the port.
+This means that incoming TCP traffic will be forwarded to port 22 (SSH server) on the same machine as the service is running on.
+
+Enable and start the service on the computer::
+
+    systemctl --system daemon-reload
+    systemctl enable mqtt-forward.service
+    systemctl start mqtt-forward.service
+
+Connect to a server using mqtt-forward
+++++++++++++++++++++++++++++++++++++++
+
+If a server side program was launched with the *-b* option, it will transmit beacons which makes it easier for clients to know if it is available.
+
+On the computer from where the connection to the remote server is going to be established,
+run mqtt-forward with the *-l* option in order to list all available servers::
+
+    mqtt-forward --mqtt-host some-domain.se -l
+
+If the server created in the above example is available, a print similar to the one below will be shown::
+
+
+    Detected servers:
+
+                                 Server ID       Last seen (seconds ago)
+
+                              my-server-id                             0
+
+To connect to "my-server-id", run mqtt-forward like this::
+
+    mqtt-forward --mqtt-host some-domain.se --server-side-id my-server-id -p 1234
+
+This will start an mqtt-forward instance that will connect to MQTT broker some-domain.se and create a tunnel to server "my-server-id".
+It will listen to incoming TCP connections on port 1234 and forward all traffic to the server "my-server-id".
+
+Had we not provided the -p|--port argument, the default port (22) would have been used.
+This would work if there is no native SSH server running on the same computer and if the user has privilege to bind to port 22.
+But it is recommended to use another port than 22 on the client side.
+
+It is now possible to connect to the remote server like this (from the same computer where mqtt-forward is running)::
+
+    ssh -p 1234 user@localhost
+
+From another computer on the same local network as the computer hosting mqtt-forward::
+
+    ssh -p 1234 user@<ip address of computer hosting mqtt-forward>
