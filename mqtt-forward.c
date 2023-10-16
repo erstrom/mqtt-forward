@@ -1268,7 +1268,7 @@ int main(int argc, char **argv)
 			mqtt_qos = strtol(optarg, NULL, 10);
 			mqtt_qos_set = true;
 			break;
-		case 1008,
+		case 1008:
 			strcpy(mqtt_prefix, optarg);
 			break;
 		case 'h':
