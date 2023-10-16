@@ -34,6 +34,7 @@
 #define ENV_VAR_ROOT_CA     "MQTT_FORWARD_ROOT_CA"
 #define ENV_VAR_CERTIFICATE "MQTT_FORWARD_CERTIFICATE"
 #define ENV_VAR_PRIVATE_KEY "MQTT_FORWARD_PRIVATE_KEY"
+#define ENV_VAR_PREFIX      "MQTT_FORWARD_PREFIX"
 
 struct packet_backlog_data {
 	uint8_t *buf;
@@ -110,6 +111,7 @@ static char mqtt_host[100];
 static char mqtt_root_ca[100];
 static char mqtt_certificate[100];
 static char mqtt_private_key[100];
+static char mqtt_prefix[100];
 static char tcp_server_addr[100];
 
 static void clear_rx_packet_backlog(struct rx_packet_backlog *rx_backlog)
@@ -415,7 +417,8 @@ static int create_session(const char *session_id,
 
 		snprintf(topic,
 			 sizeof(topic),
-			 "ssh/%s/%s/rx",
+			 "%s/%s/%s/rx",
+			 mqtt_prefix,
 			 server_mqtt_id,
 			 session_id_local);
 
@@ -443,13 +446,15 @@ static int create_session(const char *session_id,
 	if (server_session)
 		snprintf(tcp_sessions[session_nbr_local].publish_topic,
 			 200,
-			 "ssh/%s/%s/rx",
+			 "%s/%s/%s/rx",
+			 mqtt_prefix,
 			 server_mqtt_id,
 			 session_id_local);
 	else
 		snprintf(tcp_sessions[session_nbr_local].publish_topic,
 			 200,
-			 "ssh/%s/%s/tx",
+			 "%s/%s/%s/tx",
+			 mqtt_prefix,
 			 server_mqtt_id,
 			 session_id_local);
 
@@ -547,7 +552,7 @@ static void *beacon_tx_thread_fn(void *arg)
 	struct tcp_over_mqtt_hdr msg_hdr = {.flags = TCP_OVER_MQTT_FLAG_BEACON};
 	char topic[200];
 
-	snprintf(topic, sizeof(topic), "ssh/%s/beacon/rx", server_mqtt_id);
+	snprintf(topic, sizeof(topic), "%s/%s/beacon/rx", mqtt_prefix, server_mqtt_id);
 
 	for (;;) {
 		if (!connected_to_mqtt_server) {
@@ -913,7 +918,8 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc)
 	if (server_mode) {
 		snprintf(topic,
 			 200,
-			 "ssh/%s/+/tx",
+			 "%s/%s/+/tx",
+			 mqtt_prefix,
 			 server_mqtt_id);
 
 		ret = mosquitto_subscribe(g_mqtt_client,
@@ -928,7 +934,8 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc)
 	} else if (list_servers) {
 		snprintf(topic,
 			 200,
-			 "ssh/+/beacon/rx");
+			 "%s/+/beacon/rx",
+			 mqtt_prefix);
 
 		ret = mosquitto_subscribe(g_mqtt_client,
 					  &mid,
@@ -1162,6 +1169,7 @@ int main(int argc, char **argv)
 		{"mqtt-certificate", 1, 0, 1003},
 		{"mqtt-private-key", 1, 0, 1004},
 		{"mqtt-qos", 1, 0, 1007},
+		{"mqtt-prefix", 1, 0, 1008},
 		{0, 0, 0, 0}
 	};
 	int port = 22;
@@ -1176,6 +1184,8 @@ int main(int argc, char **argv)
 	bool tcp_server_addr_set = false;;
 	bool mqtt_qos_set = false;
 	char *env_var;
+
+	strcpy(mqtt_prefix, "ssh");
 
 	/* Check environment variables before reading command line options*/
 	if ((env_var = getenv(ENV_VAR_MQTT_HOST))) {
@@ -1196,6 +1206,9 @@ int main(int argc, char **argv)
 		strcpy(mqtt_private_key, env_var);
 		mqtt_private_key_set = true;
 		use_tls = true;
+	}
+	if ((env_var = getenv(ENV_VAR_PREFIX))) {
+		strcpy(mqtt_prefix, env_var);
 	}
 
 	while ((c = getopt_long(argc, argv, "hdtslba:p:", long_options, &option_index)) != -1) {
@@ -1254,6 +1267,9 @@ int main(int argc, char **argv)
 		case 1007:
 			mqtt_qos = strtol(optarg, NULL, 10);
 			mqtt_qos_set = true;
+			break;
+		case 1008:
+			strcpy(mqtt_prefix, optarg);
 			break;
 		case 'h':
 		default:
