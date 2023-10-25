@@ -246,7 +246,7 @@ static void *tcp_session_rx_thread_fn(void *arg)
 				retransmit_tx_hdr->flags = 0;
 			}
 
-			DBG_LOG_("Session %s: TX RETRANSMIT: %4llu. Acked %4llu\n",
+			DBG_LOG_("Session %s: TX RETRANSMIT: %4lu. Acked %4lu\n",
 				 session_data->session_id,
 				 retransmit_tx_hdr->seq_nbr,
 				 retransmit_tx_hdr->acked_seq_nbr);
@@ -276,7 +276,7 @@ static void *tcp_session_rx_thread_fn(void *arg)
 					tx_hdr.acked_seq_nbr =
 						rx_backlog->expected_seq_nbr - 1;
 				}
-				DBG_LOG_("Session %s: TX HEARTBEAT: %4llu. Acked %4llu\n",
+				DBG_LOG_("Session %s: TX HEARTBEAT: %4lu. Acked %4lu\n",
 					 session_data->session_id,
 					 tx_hdr.seq_nbr,
 					 tx_hdr.acked_seq_nbr);
@@ -335,7 +335,7 @@ static void *tcp_session_rx_thread_fn(void *arg)
 			tx_backlog->backlog[backlog_write_idx].len = recv_len;
 			memcpy(tx_backlog->backlog[backlog_write_idx].buf, rx_buf, recv_len);
 			session_data->tx_seq_nbr++;
-			DBG_LOG_("Session %s: TX: %4llu. Acked %4llu\n",
+			DBG_LOG_("Session %s: TX: %4lu. Acked %4lu\n",
 				 session_data->session_id,
 				 tx_hdr.seq_nbr,
 				 tx_hdr.acked_seq_nbr);
@@ -461,7 +461,7 @@ static int create_session(const char *session_id,
 	fprintf(stderr, "%s: Creating session thread for session %s, session number %lu\n",
 		 __func__,
 		 tcp_sessions[session_nbr_local].session_id,
-		 (long unsigned int) session_nbr_local);
+		 session_nbr_local);
 	ret = pthread_create(&tcp_rx_threads[session_nbr_local],
 			     NULL,
 			     &tcp_session_rx_thread_fn,
@@ -709,12 +709,12 @@ static void handle_mqtt_message(uint8_t *msg,
 	tx_backlog = &tcp_sessions[session_nbr].tx_backlog;
 
 	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR)
-		DBG_LOG_("Session %s: RX: %4llu. Remote acked %4llu\n",
+		DBG_LOG_("Session %s: RX: %4lu. Remote acked %4lu\n",
 			 tcp_sessions[session_nbr].session_id,
 			 rx_hdr->seq_nbr,
 			 rx_hdr->acked_seq_nbr);
 	else
-		DBG_LOG_("Session %s: RX: %4llu. No remote ack\n",
+		DBG_LOG_("Session %s: RX: %4lu. No remote ack\n",
 			 tcp_sessions[session_nbr].session_id,
 			 rx_hdr->seq_nbr);
 
@@ -767,7 +767,7 @@ static void handle_mqtt_message(uint8_t *msg,
 
 	if (backlog_offset < 0) {
 		fprintf(stderr, "%s: backlog offset is negative! Corrupt input data?\n", __func__);
-		fprintf(stderr, "RX sequence number: %4llu\n",
+		fprintf(stderr, "RX sequence number: %4lu\n",
 			rx_hdr->seq_nbr);
 		return;
 	}
@@ -777,7 +777,7 @@ static void handle_mqtt_message(uint8_t *msg,
 		/* A packet is probably lost :(
 		 * move forward in the backlog until a valid packet is found */
 		while (!rx_backlog->backlog[rx_backlog->read_idx].buf) {
-			fprintf(stderr, "%s: Packet %llu dropped!\n",
+			fprintf(stderr, "%s: Packet %ld dropped!\n",
 				__func__,
 				rx_backlog->expected_seq_nbr);
 			rx_backlog->expected_seq_nbr++;
