@@ -23,6 +23,7 @@
 #define SESSION_BACKLOG_SIZE 200
 #define TX_WINDOW_LIMIT 100
 #define MAX_SERVER_LIST 30
+#define MQTT_TOPIC_MAX_LEN 250
 
 #define DBG_LOG_(fmt, ...) \
 	do { \
@@ -111,7 +112,7 @@ static char mqtt_host[100];
 static char mqtt_root_ca[100];
 static char mqtt_certificate[100];
 static char mqtt_private_key[100];
-static char mqtt_topic_prefix[100];
+static char mqtt_topic_prefix[50];
 static char tcp_server_addr[100];
 
 static void clear_rx_packet_backlog(struct rx_packet_backlog *rx_backlog)
@@ -413,7 +414,7 @@ static int create_session(const char *session_id,
 	} else {
 		/* Subscribe to data from the server for this session_id */
 		int mid;
-		char topic[200];
+		char topic[MQTT_TOPIC_MAX_LEN];
 
 		snprintf(topic,
 			 sizeof(topic),
@@ -442,17 +443,17 @@ static int create_session(const char *session_id,
 	tcp_sessions[session_nbr_local].rx_buf = calloc(SESSION_RX_BUF_SIZE, 1);
 	tcp_sessions[session_nbr_local].rx_backlog.expected_seq_nbr = 1;
 	tcp_sessions[session_nbr_local].tx_seq_nbr = 1;
-	tcp_sessions[session_nbr_local].publish_topic = calloc(200, 1);
+	tcp_sessions[session_nbr_local].publish_topic = calloc(MQTT_TOPIC_MAX_LEN, 1);
 	if (server_session)
 		snprintf(tcp_sessions[session_nbr_local].publish_topic,
-			 200,
+			 MQTT_TOPIC_MAX_LEN,
 			 "%s/%s/%s/rx",
 			 mqtt_topic_prefix,
 			 server_mqtt_id,
 			 session_id_local);
 	else
 		snprintf(tcp_sessions[session_nbr_local].publish_topic,
-			 200,
+			 MQTT_TOPIC_MAX_LEN,
 			 "%s/%s/%s/tx",
 			 mqtt_topic_prefix,
 			 server_mqtt_id,
@@ -550,7 +551,7 @@ static void *beacon_tx_thread_fn(void *arg)
 {
 	struct timespec ts = {.tv_sec = 3};
 	struct tcp_over_mqtt_hdr msg_hdr = {.flags = TCP_OVER_MQTT_FLAG_BEACON};
-	char topic[200];
+	char topic[MQTT_TOPIC_MAX_LEN];
 
 	snprintf(topic, sizeof(topic), "%s/%s/beacon/rx", mqtt_topic_prefix, server_mqtt_id);
 
@@ -900,7 +901,7 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc)
 {
 	int ret;
 	int mid;
-	char topic[200];
+	char topic[MQTT_TOPIC_MAX_LEN];
 
 	(void)mosq;
 	(void)obj;
@@ -917,7 +918,7 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc)
 
 	if (server_mode) {
 		snprintf(topic,
-			 200,
+			 MQTT_TOPIC_MAX_LEN,
 			 "%s/%s/+/tx",
 			 mqtt_topic_prefix,
 			 server_mqtt_id);
@@ -933,7 +934,7 @@ static void on_connect(struct mosquitto *mosq, void *obj, int rc)
 		}
 	} else if (list_servers) {
 		snprintf(topic,
-			 200,
+			 MQTT_TOPIC_MAX_LEN,
 			 "%s/+/beacon/rx",
 			 mqtt_topic_prefix);
 
@@ -1186,7 +1187,7 @@ int main(int argc, char **argv)
 	bool mqtt_qos_set = false;
 	char *env_var;
 
-	strcpy(mqtt_topic_prefix, "ssh");
+	strncpy(mqtt_topic_prefix, "ssh", sizeof(mqtt_topic_prefix));
 
 	/* Check environment variables before reading command line options*/
 	if ((env_var = getenv(ENV_VAR_MQTT_HOST))) {
@@ -1209,7 +1210,7 @@ int main(int argc, char **argv)
 		use_tls = true;
 	}
 	if ((env_var = getenv(ENV_VAR_TOPIC_PREFIX))) {
-		strcpy(mqtt_topic_prefix, env_var);
+		strncpy(mqtt_topic_prefix, env_var, sizeof(mqtt_topic_prefix));
 	}
 
 	while ((c = getopt_long(argc, argv, "hdtslba:p:", long_options, &option_index)) != -1) {
@@ -1270,7 +1271,7 @@ int main(int argc, char **argv)
 			mqtt_qos_set = true;
 			break;
 		case 1008:
-			strcpy(mqtt_topic_prefix, optarg);
+			strncpy(mqtt_topic_prefix, optarg, sizeof(mqtt_topic_prefix));
 			break;
 		case 'h':
 		default:
