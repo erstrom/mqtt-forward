@@ -1123,10 +1123,11 @@ static void print_usage(char *prog_name)
 	fprintf(stderr, "  --server|-s Run program on TCP server side\n");
 	fprintf(stderr, "              If not set, program is assumed to run on TCP client side\n");
 	fprintf(stderr, "  --port|-p   TCP port to forward (client or server port).\n");
-	fprintf(stderr, "              If -s flag was set, the TCP port refers to the local TCP server port. The program will connect to this port in this case\n");
-	fprintf(stderr, "              If -s flag was not set, the TCP port refers to the remote TCP server port. The program will listen to this port in this case\n");
+	fprintf(stderr, "              If -s flag was set, the port refers to the TCP server port on the server side. The program will connect to this port in this case\n");
+	fprintf(stderr, "              If -s flag was not set (.i.e. client mode), the port refers to the local listen port. The program will listen to this port in this case\n");
 	fprintf(stderr, "              If not set, a default port of 22 will be used\n");
-	fprintf(stderr, "  --addr|-a   Address of TCP server (IP address of domain name). Only applicable if --server was used\n");
+	fprintf(stderr, "  --addr|-a   Address of TCP server (IP address or domain name). Only applicable if --server was used\n");
+	fprintf(stderr, "              This is the address the server side program will connect to.\n");
 	fprintf(stderr, "              If not set, a default address of 127.0.0.1 will be used\n");
 	fprintf(stderr, "  --client-id MQTT client id. Used as MQTT client id if --server was not used used\n");
 	fprintf(stderr, "              If not set, a random client id will be used\n");
