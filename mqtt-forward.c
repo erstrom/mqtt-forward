@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -36,6 +37,12 @@
 #define ENV_VAR_CERTIFICATE "MQTT_FORWARD_CERTIFICATE"
 #define ENV_VAR_PRIVATE_KEY "MQTT_FORWARD_PRIVATE_KEY"
 #define ENV_VAR_TOPIC_PREFIX "MQTT_FORWARD_TOPIC_PREFIX"
+#define ENV_VAR_REMOTE_IP   "MQTT_FORWARD_REMOTE_IP"
+#define ENV_VAR_REMOTE_PORT "MQTT_FORWARD_REMOTE_PORT"
+
+/**
+ * Internal types
+ */
 
 struct packet_backlog_data {
 	uint8_t *buf;
@@ -54,7 +61,13 @@ struct tx_packet_backlog {
 	int first_unacked_idx;
 };
 
+struct tcp_session_config {
+	uint32_t ip_addr;
+	uint16_t port;
+};
+
 struct tcp_session {
+	bool server_session;
 	char *session_id;
 	char *publish_topic;
 	int sock;
@@ -62,8 +75,17 @@ struct tcp_session {
 	uint64_t tx_seq_nbr;
 	struct rx_packet_backlog rx_backlog;
 	struct tx_packet_backlog tx_backlog;
+	struct tcp_session_config *session_cfg;
 };
 
+struct tcp_server_list {
+	char *server_id;
+	time_t last_seen_time;
+};
+
+/**
+ * Message types (all structs are packed)
+ */
 struct tcp_over_mqtt_hdr {
 	uint64_t seq_nbr;
 	uint64_t acked_seq_nbr;
@@ -71,15 +93,48 @@ struct tcp_over_mqtt_hdr {
 #define TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR (2)
 #define TCP_OVER_MQTT_FLAG_NO_DATA (4)
 #define TCP_OVER_MQTT_FLAG_BEACON (8)
+#define TCP_OVER_MQTT_FLAG_REMOTE_CONFIG (16)
 	uint32_t flags;
 	uint32_t pad;
 } __attribute__((packed));
 
-struct tcp_server_list {
-	char *server_id;
-	time_t last_seen_time;
+struct tcp_over_mqtt_remote_config_hdr {
+	/**
+	 * Total size (in bytes) of the config message
+	 */
+	uint32_t config_size;
+	/**
+	 * Number of config items in the message
+	 */
+	uint32_t num_config_items;
+	uint8_t data[];
+} __attribute__((packed));
+
+struct tcp_over_mqtt_remote_config_item_hdr {
+	/**
+	 * config_type has any of the values defined in
+	 * enum tcp_over_mqtt_remote_config_type
+	 */
+	uint16_t config_type;
+	uint8_t data[];
+} __attribute__((packed));
+
+struct tcp_over_mqtt_remote_config_ip_addr {
+	uint32_t ip_addr;
+} __attribute__((packed));
+
+struct tcp_over_mqtt_remote_config_port {
+	uint16_t port;
+} __attribute__((packed));
+
+enum tcp_over_mqtt_remote_config_type {
+	REMOTE_CONFIG_TYPE_IP_ADDR,
+	REMOTE_CONFIG_TYPE_PORT,
 };
 
+/**
+ * Global variables
+ */
 static int tcp_client_listen_sock;
 static int tcp_client_listen_port;
 static int tcp_server_connect_port;
@@ -94,7 +149,7 @@ static bool server_mode;
 static bool list_servers;
 static bool transmit_beacons;
 static struct tcp_session tcp_sessions[MAX_SESSIONS];
-static struct sockaddr_in *remote_tcp_server_addr;
+static struct sockaddr_in *tcp_server_addr;
 static char *old_session_ids[MAX_LIFETIME_SESSIONS];
 static size_t num_old_sessions;
 static bool debug;
@@ -104,6 +159,10 @@ static pthread_mutex_t session_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t server_list_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static bool use_tls;
+static bool remote_tcp_port_set;
+static bool remote_tcp_server_addr_set;
+static uint32_t remote_tcp_server_addr;
+static uint16_t remote_tcp_port;
 static char server_mqtt_id[100];
 static char client_mqtt_id[100];
 static int mqtt_port;
@@ -113,7 +172,7 @@ static char mqtt_root_ca[100];
 static char mqtt_certificate[100];
 static char mqtt_private_key[100];
 static char mqtt_topic_prefix[50];
-static char tcp_server_addr[100];
+static char tcp_server_addr_str[100];
 
 static void clear_rx_packet_backlog(struct rx_packet_backlog *rx_backlog)
 {
@@ -148,6 +207,7 @@ static void clear_session(struct tcp_session *session_data)
 	old_session_ids[num_old_sessions++] = session_data->session_id;
 	free(session_data->rx_buf);
 	free(session_data->publish_topic);
+	free(session_data->session_cfg);
 	clear_rx_packet_backlog(&session_data->rx_backlog);
 	clear_tx_packet_backlog(&session_data->tx_backlog);
 	memset(session_data, 0, sizeof(*session_data));
@@ -204,9 +264,66 @@ static char *gen_session_id()
 	return gen_random_id(32);
 }
 
+static int create_config_header(const struct tcp_session_config *session_cfg,
+				uint8_t **cfg_hdr_buf,
+				size_t *cfg_hdr_size)
+{
+	uint8_t *hdr_buf;
+	struct tcp_over_mqtt_remote_config_hdr *remote_cfg;
+	struct tcp_over_mqtt_remote_config_item_hdr *item_hdr;
+	struct tcp_over_mqtt_remote_config_ip_addr *item_ip_addr;
+	struct tcp_over_mqtt_remote_config_port *item_port;
+	char *tmp_ptr;
+	size_t hdr_size;
+
+	/* Calculate size of config header */
+	hdr_size = sizeof(struct tcp_over_mqtt_remote_config_hdr);
+	hdr_size += session_cfg->ip_addr ?
+		(sizeof(struct tcp_over_mqtt_remote_config_item_hdr) + sizeof(struct tcp_over_mqtt_remote_config_ip_addr)) : 0;
+	hdr_size += session_cfg->port ?
+		(sizeof(struct tcp_over_mqtt_remote_config_item_hdr) + sizeof(struct tcp_over_mqtt_remote_config_port)) : 0;
+
+	/* Allocate and populate config header */
+	hdr_buf = calloc(hdr_size, 1);
+	if (!hdr_buf) {
+		fprintf(stderr, "%s: Unable to allocate header buf\n", __func__);
+		return -1;
+	}
+
+	remote_cfg = (struct tcp_over_mqtt_remote_config_hdr *)hdr_buf;
+	remote_cfg->config_size = hdr_size;
+	item_hdr = (struct tcp_over_mqtt_remote_config_item_hdr *)remote_cfg->data;
+	tmp_ptr = (char*)item_hdr;
+	if (session_cfg->ip_addr) {
+		item_hdr->config_type = REMOTE_CONFIG_TYPE_IP_ADDR;
+		item_ip_addr =
+			(struct tcp_over_mqtt_remote_config_ip_addr *)item_hdr->data;
+		item_ip_addr->ip_addr = session_cfg->ip_addr;
+		tmp_ptr += sizeof(*item_hdr) + sizeof(*item_ip_addr);
+		remote_cfg->num_config_items++;
+	}
+
+	item_hdr = (struct tcp_over_mqtt_remote_config_item_hdr *)tmp_ptr;
+	if (session_cfg->port) {
+		item_hdr->config_type = REMOTE_CONFIG_TYPE_PORT;
+		item_port =
+			(struct tcp_over_mqtt_remote_config_port *)item_hdr->data;
+		item_port->port = session_cfg->port;
+		tmp_ptr += sizeof(*item_hdr) + sizeof(*item_ip_addr);
+		remote_cfg->num_config_items++;
+	}
+
+	*cfg_hdr_buf = hdr_buf;
+	*cfg_hdr_size = hdr_size;
+
+	return 0;
+}
+
 static void *tcp_session_rx_thread_fn(void *arg)
 {
 	uint8_t *rx_buf;
+	uint8_t *cfg_hdr_buf;
+	size_t cfg_hdr_size;
 	int ret;
 	int recv_len;
 	struct tcp_session *session_data;
@@ -228,6 +345,17 @@ static void *tcp_session_rx_thread_fn(void *arg)
 	topic = session_data->publish_topic;
 	tx_backlog = &session_data->tx_backlog;
 	rx_backlog = &session_data->rx_backlog;
+	cfg_hdr_size = 0;
+
+	if (!session_data->server_session && session_data->session_cfg) {
+		/* Create the config header that will be used in the first
+		 * outgoing message (for clients only) */
+		ret = create_config_header(session_data->session_cfg,
+					   &cfg_hdr_buf,
+					   &cfg_hdr_size);
+		if (ret < 0)
+			goto out;
+	}
 
 	for (;;) {
 		pthread_mutex_lock(&session_mtx);
@@ -277,6 +405,19 @@ static void *tcp_session_rx_thread_fn(void *arg)
 					tx_hdr.acked_seq_nbr =
 						rx_backlog->expected_seq_nbr - 1;
 				}
+				tx_hdr.flags |= cfg_hdr_size ?
+					TCP_OVER_MQTT_FLAG_REMOTE_CONFIG : 0;
+				memcpy(rx_buf, &tx_hdr, sizeof(tx_hdr));
+				recv_len = sizeof(tx_hdr);
+				if (cfg_hdr_size) {
+					memcpy(rx_buf + sizeof(tx_hdr), cfg_hdr_buf, cfg_hdr_size);
+					recv_len += cfg_hdr_size;
+					/* The config header is only used in the first
+					 * message */
+					free(cfg_hdr_buf);
+					cfg_hdr_buf = NULL;
+					cfg_hdr_size = 0;
+				}
 				DBG_LOG_("Session %s: TX HEARTBEAT: %4lu. Acked %4lu\n",
 					 session_data->session_id,
 					 tx_hdr.seq_nbr,
@@ -284,8 +425,8 @@ static void *tcp_session_rx_thread_fn(void *arg)
 				ret = mosquitto_publish(g_mqtt_client,
 							NULL,
 							topic,
-							sizeof(tx_hdr),
-							&tx_hdr,
+							recv_len,
+							rx_buf,
 							mqtt_qos,
 							false /*retain*/);
 				if (ret) {
@@ -300,8 +441,8 @@ static void *tcp_session_rx_thread_fn(void *arg)
 
 			/* Data has been received on socket */
 			recv_len = recv(sock,
-					rx_buf + sizeof(tx_hdr),
-					SESSION_RX_BUF_SIZE - sizeof(tx_hdr),
+					rx_buf + sizeof(tx_hdr) + cfg_hdr_size,
+					SESSION_RX_BUF_SIZE - sizeof(tx_hdr) - cfg_hdr_size,
 					0);
 			if (recv_len < 0) {
 				fprintf(stderr, "%s: recv errno: %d\n", __func__, errno);
@@ -318,8 +459,19 @@ static void *tcp_session_rx_thread_fn(void *arg)
 				tx_hdr.flags |= TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR;
 				tx_hdr.acked_seq_nbr = rx_backlog->expected_seq_nbr - 1;
 			}
+			tx_hdr.flags |= cfg_hdr_size ?
+				TCP_OVER_MQTT_FLAG_REMOTE_CONFIG : 0;
 			memcpy(rx_buf, &tx_hdr, sizeof(tx_hdr));
 			recv_len += sizeof(tx_hdr);
+			if (cfg_hdr_size) {
+				memcpy(rx_buf + sizeof(tx_hdr), cfg_hdr_buf, cfg_hdr_size);
+				recv_len += cfg_hdr_size;
+				/* The config header is only used in the first
+				 * message */
+				free(cfg_hdr_buf);
+				cfg_hdr_buf = NULL;
+				cfg_hdr_size = 0;
+			}
 
 			/* re-read backlog_offset since acked_seq_nbr might have
 			 * been update during the sleep of this thread. */
@@ -357,6 +509,7 @@ static void *tcp_session_rx_thread_fn(void *arg)
 			}
 		}
 	}
+out:
 	fprintf(stderr, "%s: TCP session ended\n", __func__);
 
 	clear_session(session_data);
@@ -364,11 +517,42 @@ static void *tcp_session_rx_thread_fn(void *arg)
 	return NULL;
 }
 
+static int connect_server_session(const struct tcp_session_config *session_cfg,
+				  int *tcp_sock)
+{
+	int ret;
+	static struct sockaddr_in server_addr;
+
+	server_addr = *tcp_server_addr;
+
+	/* Create TCP socket and connect to the server*/
+	*tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (session_cfg) {
+		if (session_cfg->ip_addr)
+			server_addr.sin_addr.s_addr = session_cfg->ip_addr;
+		if (session_cfg->port)
+			server_addr.sin_port = htons(session_cfg->port);
+	}
+
+	ret = connect(*tcp_sock,
+		      (const struct sockaddr *) &server_addr,
+		      sizeof(server_addr));
+	if (ret) {
+		fprintf(stderr, "%s: Unable to establish TCP connection. errno %d\n",
+			__func__, errno);
+		return -1;
+	}
+
+	return 0;
+}
+
 static int create_session(const char *session_id,
 			  size_t session_id_len,
 			  size_t *session_nbr,
 			  int tcp_sock,
-			  bool server_session)
+			  bool server_session,
+			  struct tcp_session_config *session_cfg)
 {
 	int ret;
 	size_t session_nbr_local;
@@ -400,17 +584,9 @@ static int create_session(const char *session_id,
 	}
 
 	if (server_session) {
-		/* Create TCP socket and connect to the server over loopback
-		 * interface */
-		tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
-		ret = connect(tcp_sock,
-			      (const struct sockaddr *) remote_tcp_server_addr,
-			      sizeof(*remote_tcp_server_addr));
-		if (ret) {
-			fprintf(stderr, "%s: Unable to establish TCP connection. errno %d\n",
-				  __func__, errno);
+		ret = connect_server_session(session_cfg, &tcp_sock);
+		if (ret)
 			return -1;
-		}
 	} else {
 		/* Subscribe to data from the server for this session_id */
 		int mid;
@@ -438,12 +614,14 @@ static int create_session(const char *session_id,
 
 	/* Create a session struct for the session*/
 	memset(&tcp_sessions[session_nbr_local], 0, sizeof(tcp_sessions[0]));
+	tcp_sessions[session_nbr_local].server_session = server_session;
 	tcp_sessions[session_nbr_local].session_id = session_id_local;
 	tcp_sessions[session_nbr_local].sock = tcp_sock;
 	tcp_sessions[session_nbr_local].rx_buf = calloc(SESSION_RX_BUF_SIZE, 1);
 	tcp_sessions[session_nbr_local].rx_backlog.expected_seq_nbr = 1;
 	tcp_sessions[session_nbr_local].tx_seq_nbr = 1;
 	tcp_sessions[session_nbr_local].publish_topic = calloc(MQTT_TOPIC_MAX_LEN, 1);
+	tcp_sessions[session_nbr_local].session_cfg = session_cfg;
 	if (server_session)
 		snprintf(tcp_sessions[session_nbr_local].publish_topic,
 			 MQTT_TOPIC_MAX_LEN,
@@ -484,6 +662,7 @@ static void *tcp_accept_thread_fn(void *arg)
 	int ret;
 	int client_sock;
 	size_t session_nbr;
+	struct tcp_session_config *session_cfg;
 
 	for (;;) {
 		client_sock = accept(tcp_client_listen_sock,
@@ -497,12 +676,22 @@ static void *tcp_accept_thread_fn(void *arg)
 			continue;
 		}
 
+		session_cfg = NULL;
+		if (remote_tcp_port_set ||remote_tcp_server_addr_set ) {
+			session_cfg = calloc(sizeof(*session_cfg), 1);
+			session_cfg->ip_addr =
+				remote_tcp_server_addr_set ? remote_tcp_server_addr : 0;
+			session_cfg->port =
+				remote_tcp_port_set ? remote_tcp_port : 0;
+		}
+
 		pthread_mutex_lock(&session_mtx);
 		ret = create_session(NULL, /*client session*/
 				     0,
 				     &session_nbr,
 				     client_sock,
-				     false); /*client session*/
+				     false, /*client session*/
+				     session_cfg);
 		pthread_mutex_unlock(&session_mtx);
 		if (ret < 0) {
 			fprintf(stderr, "%s: Unable to create client session\n", __func__);
@@ -640,6 +829,40 @@ static void handle_mqtt_message_list_servers(const char *recvd_client_id,
 		fprintf(stderr, "Server list exhausted!\n");
 }
 
+static void handle_remote_config(struct tcp_over_mqtt_remote_config_hdr *remote_cfg,
+				 struct tcp_session_config *session_cfg)
+{
+	int cfg_idx;
+	struct tcp_over_mqtt_remote_config_item_hdr *item_hdr;
+	struct tcp_over_mqtt_remote_config_ip_addr *item_ip_addr;
+	struct tcp_over_mqtt_remote_config_port *item_port;
+	char *tmp_ptr;
+
+	item_hdr = (struct tcp_over_mqtt_remote_config_item_hdr *)remote_cfg->data;
+	for (cfg_idx = 0; cfg_idx < remote_cfg->num_config_items; cfg_idx++) {
+		tmp_ptr = (char*)item_hdr;
+		switch (item_hdr->config_type) {
+		case REMOTE_CONFIG_TYPE_IP_ADDR:
+			item_ip_addr =
+				(struct tcp_over_mqtt_remote_config_ip_addr *)item_hdr->data;
+			session_cfg->ip_addr = item_ip_addr->ip_addr;
+			tmp_ptr += sizeof(*item_hdr) + sizeof(*item_ip_addr);
+			break;
+		case REMOTE_CONFIG_TYPE_PORT:
+			item_port =
+				(struct tcp_over_mqtt_remote_config_port *)item_hdr->data;
+			session_cfg->port = item_port->port;
+			tmp_ptr += sizeof(*item_hdr) + sizeof(*item_port);
+			break;
+		default:
+			goto out;
+		}
+		item_hdr = (struct tcp_over_mqtt_remote_config_item_hdr *)tmp_ptr;
+	}
+out:
+	return;
+}
+
 static void handle_mqtt_message(uint8_t *msg,
 				int msg_len,
 				const char *session_id,
@@ -655,9 +878,12 @@ static void handle_mqtt_message(uint8_t *msg,
 	int backlog_write_idx;
 	int backlog_offset;
 	struct tcp_over_mqtt_hdr *rx_hdr;
+	struct tcp_over_mqtt_remote_config_hdr *remote_cfg;
 	struct rx_packet_backlog *rx_backlog;
 	struct tx_packet_backlog *tx_backlog;
 	size_t session_nbr;
+	size_t remote_cfg_offset = 0;
+	struct tcp_session_config *session_cfg = NULL;
 
 	rx_hdr = (struct tcp_over_mqtt_hdr *) msg;
 
@@ -695,12 +921,20 @@ static void handle_mqtt_message(uint8_t *msg,
 			}
 		}
 
+		if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_REMOTE_CONFIG) {
+			remote_cfg = (struct tcp_over_mqtt_remote_config_hdr *)(msg + sizeof(*rx_hdr));
+			remote_cfg_offset = remote_cfg->config_size;
+			session_cfg = calloc(sizeof(*session_cfg), 1);
+			handle_remote_config(remote_cfg, session_cfg);
+		}
+
 		pthread_mutex_lock(&session_mtx);
 		ret = create_session(session_id,
 				     session_id_len,
 				     &session_nbr,
 				     0,
-				     true); /*server session*/
+				     true,  /*server session*/
+				     session_cfg);
 		pthread_mutex_unlock(&session_mtx);
 		if (ret)
 			return;
@@ -757,8 +991,13 @@ static void handle_mqtt_message(uint8_t *msg,
 		return;
 	}
 
-	data_len = msg_len - sizeof(*rx_hdr);
-	data = msg + sizeof(*rx_hdr);
+	data_len = msg_len - sizeof(*rx_hdr) - remote_cfg_offset;
+	data = msg + sizeof(*rx_hdr) + remote_cfg_offset;
+	if (data_len <= 0) {
+		/* Invalid data */
+		return;
+	}
+
 	if (rx_backlog->expected_seq_nbr > rx_hdr->seq_nbr) {
 		/* Ignore old packets */
 		return;
@@ -975,7 +1214,7 @@ int mqtt_forward_init()
 	char *client_id = server_mode ? server_mqtt_id : client_mqtt_id;
 
 	if (server_mode) {
-		ret = getaddrinfo(tcp_server_addr,
+		ret = getaddrinfo(tcp_server_addr_str,
 				  NULL,
 				  &addrhint,
 				  &hostaddrinfo);
@@ -984,8 +1223,8 @@ int mqtt_forward_init()
 			goto err;
 		}
 
-		remote_tcp_server_addr = (struct sockaddr_in *)hostaddrinfo->ai_addr;
-		remote_tcp_server_addr->sin_port = htons(tcp_server_connect_port);
+		tcp_server_addr = (struct sockaddr_in *)hostaddrinfo->ai_addr;
+		tcp_server_addr->sin_port = htons(tcp_server_connect_port);
 	} else if (!list_servers) {
 		tcp_client_listen_sock = socket(AF_INET, SOCK_STREAM, 0);
 		if (tcp_client_listen_sock < 0)
@@ -1115,6 +1354,8 @@ static void print_usage(char *prog_name)
 	fprintf(stderr, "  MQTT_FORWARD_ROOT_CA         See option --mqtt-private-key\n");
 	fprintf(stderr, "  MQTT_FORWARD_CERTIFICATE     See option --mqtt-certificate\n");
 	fprintf(stderr, "  MQTT_FORWARD_PRIVATE_KEY     See option --mqtt-private-key\n");
+	fprintf(stderr, "  MQTT_FORWARD_REMOTE_IP       See option --remote-ip\n");
+	fprintf(stderr, "  MQTT_FORWARD_REMOTE_PORT     See option --remote-port\n");
 	fprintf(stderr, "The environment variables will be overridden by command line options.\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Optional arguments:\n");
@@ -1126,9 +1367,15 @@ static void print_usage(char *prog_name)
 	fprintf(stderr, "              If -s flag was set, the port refers to the TCP server port on the server side. The program will connect to this port in this case\n");
 	fprintf(stderr, "              If -s flag was not set (.i.e. client mode), the port refers to the local listen port. The program will listen to this port in this case\n");
 	fprintf(stderr, "              If not set, a default port of 22 will be used\n");
+	fprintf(stderr, "  --remote-port TCP port for remote server. Only applicable if --server was not used\n");
+	fprintf(stderr, "                This option is used for clients to set the remote port for a server side program on the fly.\n");
+	fprintf(stderr, "                This setting will override the --port settings used on the server side.\n");
 	fprintf(stderr, "  --addr|-a   Address of TCP server (IP address or domain name). Only applicable if --server was used\n");
 	fprintf(stderr, "              This is the address the server side program will connect to.\n");
 	fprintf(stderr, "              If not set, a default address of 127.0.0.1 will be used\n");
+	fprintf(stderr, "  --remote-ip Address of TCP server for remote (IP address only). Only applicable if --server was not used\n");
+	fprintf(stderr, "              This option is used for clients to set the remote address for a server side program on the fly.\n");
+	fprintf(stderr, "              This setting will override the --addr settings used on the server side.\n");
 	fprintf(stderr, "  --client-id MQTT client id. Used as MQTT client id if --server was not used used\n");
 	fprintf(stderr, "              If not set, a random client id will be used\n");
 	fprintf(stderr, "  --mqtt-port port for MQTT broker.\n");
@@ -1164,6 +1411,8 @@ int main(int argc, char **argv)
 		{"beacon", no_argument, 0, 'b'},
 		{"port", 1, 0, 'p'},
 		{"addr", 1, 0, 'a'},
+		{"remote-port", 1, 0, 1009},
+		{"remote-ip", 1, 0, 1010},
 		{"client-id", 1, 0, 1005},
 		{"server-side-id", 1, 0, 1006},
 		{"mqtt-host", 1, 0, 1001},
@@ -1187,6 +1436,7 @@ int main(int argc, char **argv)
 	bool tcp_server_addr_set = false;;
 	bool mqtt_qos_set = false;
 	char *env_var;
+	char remote_tcp_server_addr_str[100];
 
 	strncpy(mqtt_topic_prefix, "ssh", sizeof(mqtt_topic_prefix));
 
@@ -1212,6 +1462,14 @@ int main(int argc, char **argv)
 	}
 	if ((env_var = getenv(ENV_VAR_TOPIC_PREFIX))) {
 		strncpy(mqtt_topic_prefix, env_var, sizeof(mqtt_topic_prefix));
+	}
+	if ((env_var = getenv(ENV_VAR_REMOTE_IP))) {
+		strcpy(remote_tcp_server_addr_str, env_var);
+		remote_tcp_server_addr_set = true;
+	}
+	if ((env_var = getenv(ENV_VAR_REMOTE_PORT))) {
+		remote_tcp_port = strtol(env_var, NULL, 10);
+		remote_tcp_port_set = true;
 	}
 
 	while ((c = getopt_long(argc, argv, "hdtslba:p:", long_options, &option_index)) != -1) {
@@ -1244,7 +1502,7 @@ int main(int argc, char **argv)
 			tcp_port_set = true;
 			break;
 		case 'a':
-			strcpy(tcp_server_addr, optarg);
+			strcpy(tcp_server_addr_str, optarg);
 			tcp_server_addr_set = true;
 			break;
 		case 1000:
@@ -1274,6 +1532,14 @@ int main(int argc, char **argv)
 		case 1008:
 			strncpy(mqtt_topic_prefix, optarg, sizeof(mqtt_topic_prefix));
 			break;
+		case 1009:
+			remote_tcp_port = strtol(optarg, NULL, 10);
+			remote_tcp_port_set = true;
+			break;
+		case 1010:
+			strcpy(remote_tcp_server_addr_str, optarg);
+			remote_tcp_server_addr_set = true;
+			break;
 		case 'h':
 		default:
 			print_usage(argv[0]);
@@ -1300,8 +1566,8 @@ int main(int argc, char **argv)
 	}
 
 	if (server_mode && !tcp_server_addr_set) {
-		strcpy(tcp_server_addr, "127.0.0.1");
-		fprintf(stderr, "Missing server address. Using default addr %s\n", tcp_server_addr);
+		strcpy(tcp_server_addr_str, "127.0.0.1");
+		fprintf(stderr, "Missing server address. Using default addr %s\n", tcp_server_addr_str);
 	}
 
 	if (!mqtt_qos_set)
@@ -1326,6 +1592,22 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Missing MQTT private key\n");
 		return -1;
 	}
+
+	if (remote_tcp_server_addr_set && server_mode) {
+		fprintf(stderr, "Remote TCP IP addr set but it is not applicable in server mode\n");
+	} else if (remote_tcp_server_addr_set) {
+		struct in_addr in_addr;
+		ret = inet_aton(remote_tcp_server_addr_str, &in_addr);
+		if (ret < 0) {
+			fprintf(stderr, "Invalid remote IP addr: %s\n",
+				remote_tcp_server_addr_str);
+			return -1;
+		}
+		remote_tcp_server_addr = in_addr.s_addr;
+	}
+
+	if (remote_tcp_port_set && server_mode)
+		fprintf(stderr, "Remote TCP port set but it is not applicable in server mode\n");
 
 	if (server_mode)
 		tcp_server_connect_port = port;
