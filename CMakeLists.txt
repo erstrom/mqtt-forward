@@ -5,7 +5,6 @@ set(TARGET_MQTT_FORWARD mqtt-forward)
 set(include_paths
     ${CMAKE_INSTALL_PREFIX}/include/
     ${CMAKE_INSTALL_PREFIX}/usr/include/
-    ${CMAKE_CURRENT_LIST_DIR}/dep-install/include/
     ${CMAKE_CURRENT_SOURCE_DIR}/src/
     )
 
