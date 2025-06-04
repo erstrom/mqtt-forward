@@ -1366,55 +1366,51 @@ void mqtt_forward_wait(void)
 static void print_usage(char *prog_name)
 {
 	fprintf(stderr, "Usage:\n");
-	fprintf(stderr, "%s [-d] [-t] [-s] [-p tcp port] [--client-id client_id] [--mqtt-port mqtt_port] [--mqtt-root-ca rootca] [--mqtt-certificate cert] [--mqtt-private-key privatekey] --mqtt-host mqtt_host --server-side-id server_side_id\n", prog_name);
+	fprintf(stderr, "%s [-d] [-t] [-s] [-p tcp_port] [--client-id client_id] [--mqtt-port mqtt_port] [--mqtt-root-ca root_ca] [--mqtt-certificate cert] [--mqtt-private-key private_key] --mqtt-host mqtt_host --server-side-id server_side_id\n", prog_name);
 	fprintf(stderr, "\n");
-	fprintf(stderr, "Some of the options can be set with environment variables.\n");
-	fprintf(stderr, "Available environment variables are:\n");
+
+	fprintf(stderr, "Some options can be set with environment variables:\n");
 	fprintf(stderr, "  MQTT_FORWARD_MQTT_HOST       See option --mqtt-host\n");
-	fprintf(stderr, "  MQTT_FORWARD_ROOT_CA         See option --mqtt-private-key\n");
+	fprintf(stderr, "  MQTT_FORWARD_ROOT_CA         See option --mqtt-root-ca\n");
 	fprintf(stderr, "  MQTT_FORWARD_CERTIFICATE     See option --mqtt-certificate\n");
 	fprintf(stderr, "  MQTT_FORWARD_PRIVATE_KEY     See option --mqtt-private-key\n");
 	fprintf(stderr, "  MQTT_FORWARD_REMOTE_IP       See option --remote-ip\n");
 	fprintf(stderr, "  MQTT_FORWARD_REMOTE_PORT     See option --remote-port\n");
-	fprintf(stderr, "The environment variables will be overridden by command line options.\n");
+	fprintf(stderr, "Note: Environment variables will be overridden by command-line options.\n");
 	fprintf(stderr, "\n");
+
 	fprintf(stderr, "Optional arguments:\n");
-	fprintf(stderr, "  --debug|-d  Enable debug prints\n");
-	fprintf(stderr, "  --tls|-t    Use MQTT over TLS\n");
-	fprintf(stderr, "  --server|-s Run program on TCP server side\n");
-	fprintf(stderr, "              If not set, program is assumed to run on TCP client side\n");
-	fprintf(stderr, "  --port|-p   TCP port to forward (client or server port).\n");
-	fprintf(stderr, "              If -s flag was set, the port refers to the TCP server port on the server side. The program will connect to this port in this case\n");
-	fprintf(stderr, "              If -s flag was not set (.i.e. client mode), the port refers to the local listen port. The program will listen to this port in this case\n");
-	fprintf(stderr, "              If not set, a default port of 22 will be used\n");
-	fprintf(stderr, "  --remote-port TCP port for remote server. Only applicable if --server was not used\n");
-	fprintf(stderr, "                This option is used for clients to set the remote port for a server side program on the fly.\n");
-	fprintf(stderr, "                This setting will override the --port settings used on the server side.\n");
-	fprintf(stderr, "  --addr|-a   Address of TCP server (IP address or domain name). Only applicable if --server was used\n");
-	fprintf(stderr, "              This is the address the server side program will connect to.\n");
-	fprintf(stderr, "              If not set, a default address of 127.0.0.1 will be used\n");
-	fprintf(stderr, "  --remote-ip Address of TCP server for remote (IP address only). Only applicable if --server was not used\n");
-	fprintf(stderr, "              This option is used for clients to set the remote address for a server side program on the fly.\n");
-	fprintf(stderr, "              This setting will override the --addr settings used on the server side.\n");
-	fprintf(stderr, "  --client-id MQTT client id. Used as MQTT client id if --server was not used used\n");
-	fprintf(stderr, "              If not set, a random client id will be used\n");
-	fprintf(stderr, "  --mqtt-port port for MQTT broker.\n");
-	fprintf(stderr, "              A default value of 1883 will be used if --tls was not set. 8883 will be used if --tls was set\n");
-	fprintf(stderr, "  --mqtt-root-ca  root ca for MQTT broker. Only appicable if --tls was set\n");
-	fprintf(stderr, "  --mqtt-certificate  certificate for authentication with MQTT broker. Only appicable if --tls was set\n");
-	fprintf(stderr, "  --mqtt-private-key  private key for certificate. Only appicable if --tls was set\n");
-	fprintf(stderr, "  --mqtt-topic-prefix  prefix for MQTT topics. If not set, a default prefix of ssh will be used\n");
-	fprintf(stderr, "  --mqtt-qos  QoS level for MQTT.\n");
-	fprintf(stderr, "              A default Qos of 1 will be used if omitted\n");
-	fprintf(stderr, "  --beacon|-b Transmit beacon frames continuosly.\n");
-	fprintf(stderr, "              Only applicable for server side (i.e. --server was used).\n");
-	fprintf(stderr, "  --list-server|-l  List available servers (provided that the servers are transmitting beacon messages).\n");
-	fprintf(stderr, "                    Only applicable for client side (i.e. --server was not used).\n");
+	fprintf(stderr, "  --debug | -d                 Enable debug prints\n");
+	fprintf(stderr, "  --tls | -t                   Use MQTT over TLS\n");
+	fprintf(stderr, "  --server | -s                Run program on TCP server side\n");
+	fprintf(stderr, "                               If not set, program is assumed to run on TCP client side\n");
+	fprintf(stderr, "  --port | -p tcp_port         TCP port to forward (client or server port)\n");
+	fprintf(stderr, "                               Defaults to 22 if not set\n");
+	fprintf(stderr, "                               In server mode (-s): port to connect to on the server\n");
+	fprintf(stderr, "                               In client mode: local port to listen on\n");
+	fprintf(stderr, "  --remote-port port           Remote TCP port (client mode only)\n");
+	fprintf(stderr, "                               Overrides the server's --port setting\n");
+	fprintf(stderr, "  --addr | -a address          Address of TCP server (server mode only)\n");
+	fprintf(stderr, "                               Defaults to 127.0.0.1 if not set\n");
+	fprintf(stderr, "  --remote-ip ip_address       Remote server IP (client mode only)\n");
+	fprintf(stderr, "                               Overrides the server's --addr setting\n");
+	fprintf(stderr, "  --client-id id               MQTT client ID (client mode only)\n");
+	fprintf(stderr, "                               If not set, a random client ID will be generated\n");
+	fprintf(stderr, "  --mqtt-port port             Port for MQTT broker\n");
+	fprintf(stderr, "                               Defaults: 1883 (non-TLS), 8883 (TLS)\n");
+	fprintf(stderr, "  --mqtt-root-ca path          Root CA for MQTT broker (TLS only)\n");
+	fprintf(stderr, "  --mqtt-certificate path      Client certificate for MQTT authentication (TLS only)\n");
+	fprintf(stderr, "  --mqtt-private-key path      Private key for MQTT authentication (TLS only)\n");
+	fprintf(stderr, "  --mqtt-topic-prefix prefix   MQTT topic prefix (default: \"ssh\")\n");
+	fprintf(stderr, "  --mqtt-qos qos_level         QoS level for MQTT (default: 1)\n");
+	fprintf(stderr, "  --beacon | -b                Transmit beacon frames continuously (server mode only)\n");
+	fprintf(stderr, "  --list-server | -l           List available servers (client mode only)\n");
+	fprintf(stderr, "\n");
+
 	fprintf(stderr, "Mandatory arguments:\n");
-	fprintf(stderr, "  --mqtt-host       The host name of the MQTT broker\n");
-	fprintf(stderr, "  --server-side-id  A unique string identifying the server side program.\n");
-	fprintf(stderr, "                    This is used when the program is run on the server side as well as on the client side.\n");
-	fprintf(stderr, "                    The strings must match in order to have a connection between client and server.\n");
+	fprintf(stderr, "  --mqtt-host hostname         Hostname of the MQTT broker\n");
+	fprintf(stderr, "  --server-side-id id          Unique ID for the server-side program\n");
+	fprintf(stderr, "                               Must match on both client and server for connection\n");
 }
 
 int main(int argc, char **argv)
