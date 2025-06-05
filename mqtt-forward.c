@@ -17,6 +17,7 @@
 #include <mosquitto.h>
 #include <getopt.h>
 #include <poll.h>
+#include <openssl/rand.h>
 
 #define MAX_SESSIONS 100
 #define MAX_LIFETIME_SESSIONS (MAX_SESSIONS*100)
@@ -218,23 +219,16 @@ static void clear_session(struct tcp_session *session_data)
 
 static char *gen_random_id(size_t n_nibbles)
 {
-	FILE *fp;
 	int i;
 	uint8_t *id;
 	uint8_t nibble_1st;
 	uint8_t nibble_2nd;
 	char *random_id;
 
-	fp = fopen("/dev/urandom", "rb");
-	if (!fp) {
-		fprintf(stderr, "%s: unable to open /dev/urandom\n", __func__);
-		return NULL;
-	}
-
 	random_id = calloc(n_nibbles+1, 1);
 	id = calloc(n_nibbles/2, 1);
 
-	(void)fread(id, 1, n_nibbles/2, fp);
+	RAND_bytes(id, n_nibbles/2);
 
 	for (i = 0; i < n_nibbles/2; i++) {
 		nibble_1st = (id[i] & 0xf0) >> 4;
@@ -248,7 +242,6 @@ static char *gen_random_id(size_t n_nibbles)
 	}
 
 	free(id);
-	fclose(fp);
 
 	return random_id;
 }
