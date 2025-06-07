@@ -81,6 +81,9 @@ On network A, run the ssh client::
 
     ssh -p 1234 user@localhost
 
+In the test directory, there are scripts for both mqtt-forward startup as well as the setup of a mosquitto server.
+These scripts can be used as an example of how to use the tool.
+
 Using environment variables
 +++++++++++++++++++++++++++
 
@@ -235,3 +238,45 @@ It is now possible to connect to the remote server like this (from the same comp
 From another computer on the same local network as the computer hosting mqtt-forward::
 
     ssh -p 1234 user@<ip address of computer hosting mqtt-forward>
+
+Test
+----
+
+The **test** directory contains a docker based test framework that can be used to test SSH forwarding.
+
+Both secure and unsecure setups are supported.
+With the secure setup, the MQTT broker will only accept connections from clients with certificates signed by the same CA as the broker certificate.
+With the unsecure setup, all TLS security have been disabled and the broker will accept all clients.
+
+The test scripts and docker-compose file can also be used as an example of how to setup mqtt-forward together with the mosquitto mqtt broker.
+
+The test framework is comprised of one mosquitto instance running in a docker container and two instances of mqtt-forward.
+The mqtt-forward instances are setup for SSH forwarding. Both instances will connect to the same broker.
+
+Make sure the tool is built prior to running the tests!
+
+The test framework can be started from one script::
+
+    ./test/start-all.sh [-u|--unsecure]
+
+The script takes one command line option: **-u|--unsecure**.
+If set, an unsecure test setup will be created and started.
+
+The default is to have a secure setup.
+
+In a secure setup, a certificate chain will be created for both mqtt-forward instances as well as the broker.
+All certificates (broker as well as client certificates) will be signed by a common self signed CA certificate.
+
+An instance of the **eclipse-mosquitto** docker image will be launched and configured to use the generated certificates.
+
+Two instances of mqtt-forward will also be started.
+The server side instance will forward all incoming traffic to port 22 on localhost
+The client side instance will listen on port 1230.
+
+Use the ssh client to test the forwarding::
+
+    ssh -p 1230 user@localhost
+
+To stop the mosquitto docker image and the mqtt-forward instances, run::
+
+    ./test/teardown.sh
