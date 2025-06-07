@@ -43,3 +43,7 @@ GTAGS
 .vscode
 src/version.h 
 build
+
+# test related files
+test/mosquitto/.env
+test/mosquitto/mosquitto-certs

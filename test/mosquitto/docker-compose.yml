@@ -1,0 +1,11 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: secure-mosquitto
+    restart: unless-stopped
+    user: ${UID_GID}
+    volumes:
+      - ${MOSQUITTO_CONF}:/mosquitto/config/mosquitto.conf
+      - ./mosquitto-certs:/mosquitto-certs
+    ports:
+      - "8883:8883"
