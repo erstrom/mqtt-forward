@@ -12,7 +12,11 @@ set(extra_link_directories
     )
 
 set(source_files_mqtt_forward
-    ${CMAKE_CURRENT_LIST_DIR}/mqtt-forward.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/beacon.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/mqtt-forward.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/protocol.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/session.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/utils.c
     )
 
 set(CFLAGS ${CFLAGS} -O0 -g3 -Wall)

@@ -17,15 +17,12 @@
 #include <mosquitto.h>
 #include <getopt.h>
 #include <poll.h>
-#include <openssl/rand.h>
+#include "utils.h"
+#include "protocol.h"
+#include "session.h"
+#include "beacon.h"
 
-#define MAX_SESSIONS 100
-#define MAX_LIFETIME_SESSIONS (MAX_SESSIONS*100)
-#define SESSION_RX_BUF_SIZE 10000
-#define SESSION_BACKLOG_SIZE 200
 #define TX_WINDOW_LIMIT 100
-#define MAX_SERVER_LIST 30
-#define MQTT_TOPIC_MAX_LEN 250
 
 #define DBG_LOG_(fmt, ...) \
 	do { \
@@ -42,100 +39,9 @@
 #define ENV_VAR_REMOTE_PORT "MQTT_FORWARD_REMOTE_PORT"
 
 /**
- * Internal types
- */
-
-struct packet_backlog_data {
-	uint8_t *buf;
-	size_t len;
-};
-
-struct rx_packet_backlog {
-	struct packet_backlog_data backlog[SESSION_BACKLOG_SIZE];
-	uint64_t expected_seq_nbr;
-	int read_idx;
-};
-
-struct tx_packet_backlog {
-	struct packet_backlog_data backlog[SESSION_BACKLOG_SIZE];
-	uint64_t acked_seq_nbr;
-	int first_unacked_idx;
-};
-
-struct tcp_session_config {
-	uint32_t ip_addr;
-	uint16_t port;
-};
-
-struct tcp_session {
-	bool server_session;
-	char *session_id;
-	char *publish_topic;
-	int sock;
-	uint8_t *rx_buf;
-	uint64_t tx_seq_nbr;
-	struct rx_packet_backlog rx_backlog;
-	struct tx_packet_backlog tx_backlog;
-	struct tcp_session_config *session_cfg;
-};
-
-struct tcp_server_list {
-	char *server_id;
-	time_t last_seen_time;
-};
-
-/**
- * Message types (all structs are packed)
- */
-struct tcp_over_mqtt_hdr {
-	uint64_t seq_nbr;
-	uint64_t acked_seq_nbr;
-#define TCP_OVER_MQTT_FLAG_TCP_DISCONNECT (1)
-#define TCP_OVER_MQTT_FLAG_ACKED_SEQ_NBR (2)
-#define TCP_OVER_MQTT_FLAG_NO_DATA (4)
-#define TCP_OVER_MQTT_FLAG_BEACON (8)
-#define TCP_OVER_MQTT_FLAG_REMOTE_CONFIG (16)
-	uint32_t flags;
-	uint32_t pad;
-} __attribute__((packed));
-
-struct tcp_over_mqtt_remote_config_hdr {
-	/**
-	 * Total size (in bytes) of the config message
-	 */
-	uint32_t config_size;
-	/**
-	 * Number of config items in the message
-	 */
-	uint32_t num_config_items;
-	uint8_t data[];
-} __attribute__((packed));
-
-struct tcp_over_mqtt_remote_config_item_hdr {
-	/**
-	 * config_type has any of the values defined in
-	 * enum tcp_over_mqtt_remote_config_type
-	 */
-	uint16_t config_type;
-	uint8_t data[];
-} __attribute__((packed));
-
-struct tcp_over_mqtt_remote_config_ip_addr {
-	uint32_t ip_addr;
-} __attribute__((packed));
-
-struct tcp_over_mqtt_remote_config_port {
-	uint16_t port;
-} __attribute__((packed));
-
-enum tcp_over_mqtt_remote_config_type {
-	REMOTE_CONFIG_TYPE_IP_ADDR,
-	REMOTE_CONFIG_TYPE_PORT,
-};
-
-/**
  * Global variables
  */
+static bool debug;
 static int tcp_client_listen_sock;
 static int tcp_client_listen_port;
 static int tcp_server_connect_port;
@@ -143,22 +49,17 @@ static pthread_t tcp_accept_thread;
 static pthread_t beacon_print_thread;
 static pthread_t beacon_tx_thread;
 static pthread_t mqtt_create_thread;
-static pthread_t tcp_rx_threads[MAX_SESSIONS];
 static struct mosquitto *g_mqtt_client;
 static bool connected_to_mqtt_server;
 static bool server_mode;
 static bool list_servers;
 static bool transmit_beacons;
-static struct tcp_session tcp_sessions[MAX_SESSIONS];
 static struct sockaddr_in *tcp_server_addr;
-static char *old_session_ids[MAX_LIFETIME_SESSIONS];
-static size_t num_old_sessions;
-static bool debug;
-static struct tcp_server_list server_list[MAX_SESSIONS];
 
-static pthread_mutex_t session_mtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t server_list_mtx = PTHREAD_MUTEX_INITIALIZER;
 
+/**
+ * Options related global variables
+ */
 static bool use_tls;
 static bool remote_tcp_port_set;
 static bool remote_tcp_server_addr_set;
@@ -175,153 +76,9 @@ static char mqtt_private_key[100];
 static char mqtt_topic_prefix[50];
 static char tcp_server_addr_str[100];
 
-static void clear_rx_packet_backlog(struct rx_packet_backlog *rx_backlog)
-{
-	int i;
-
-	for (i = 0; i < SESSION_BACKLOG_SIZE; i++)
-		free(rx_backlog->backlog[i].buf);
-
-	memset(&rx_backlog->backlog[0],
-	       0,
-	       sizeof(rx_backlog->backlog[0])*SESSION_BACKLOG_SIZE);
-}
-
-static void clear_tx_packet_backlog(struct tx_packet_backlog *tx_backlog)
-{
-	int i;
-
-	for (i = 0; i < SESSION_BACKLOG_SIZE; i++)
-		free(tx_backlog->backlog[i].buf);
-
-	memset(&tx_backlog->backlog[0],
-	       0,
-	       sizeof(tx_backlog->backlog[0])*SESSION_BACKLOG_SIZE);
-}
-
-static void clear_session(struct tcp_session *session_data)
-{
-	fprintf(stderr, "%s: TCP session %s terminated\n",
-		__func__, session_data->session_id);
-	pthread_mutex_lock(&session_mtx);
-	/* Store the session ID of the cleared session in the old session id
-	 * array
-	 */
-	old_session_ids[num_old_sessions++] = session_data->session_id;
-	free(session_data->rx_buf);
-	free(session_data->publish_topic);
-	free(session_data->session_cfg);
-	clear_rx_packet_backlog(&session_data->rx_backlog);
-	clear_tx_packet_backlog(&session_data->tx_backlog);
-	memset(session_data, 0, sizeof(*session_data));
-	pthread_mutex_unlock(&session_mtx);
-}
-
-static char *gen_random_id(size_t n_nibbles)
-{
-	int i;
-	uint8_t *id;
-	uint8_t nibble_1st;
-	uint8_t nibble_2nd;
-	char *random_id;
-
-	random_id = calloc(n_nibbles+1, 1);
-	id = calloc(n_nibbles/2, 1);
-
-	RAND_bytes(id, n_nibbles/2);
-
-	for (i = 0; i < n_nibbles/2; i++) {
-		nibble_1st = (id[i] & 0xf0) >> 4;
-		nibble_2nd = id[i] & 0x0f;
-		nibble_1st = (nibble_1st > 9) ?
-			(nibble_1st - 10 + 'a') : (nibble_1st + '0');
-		nibble_2nd = (nibble_2nd > 9) ?
-			(nibble_2nd - 10 + 'a') : (nibble_2nd + '0');
-		random_id[2*i] = nibble_1st;
-		random_id[2*i+1] = nibble_2nd;
-	}
-
-	free(id);
-
-	return random_id;
-}
-
-static void gen_client_id(void)
-{
-	char *random_id;
-
-	random_id = gen_random_id(12);
-
-	snprintf(client_mqtt_id,
-		 sizeof(client_mqtt_id),
-		 "mqtt-forward-%s",
-		 random_id);
-	free(random_id);
-}
-
-static char *gen_session_id()
-{
-	return gen_random_id(32);
-}
-
-static int create_config_header(const struct tcp_session_config *session_cfg,
-				uint8_t **cfg_hdr_buf,
-				size_t *cfg_hdr_size)
-{
-	uint8_t *hdr_buf;
-	struct tcp_over_mqtt_remote_config_hdr *remote_cfg;
-	struct tcp_over_mqtt_remote_config_item_hdr *item_hdr;
-	struct tcp_over_mqtt_remote_config_ip_addr *item_ip_addr;
-	struct tcp_over_mqtt_remote_config_port *item_port;
-	char *tmp_ptr;
-	size_t hdr_size;
-
-	/* Calculate size of config header */
-	hdr_size = sizeof(struct tcp_over_mqtt_remote_config_hdr);
-	hdr_size += session_cfg->ip_addr ?
-		(sizeof(struct tcp_over_mqtt_remote_config_item_hdr) +
-		 sizeof(struct tcp_over_mqtt_remote_config_ip_addr)) : 0;
-	hdr_size += session_cfg->port ?
-		(sizeof(struct tcp_over_mqtt_remote_config_item_hdr) +
-		 sizeof(struct tcp_over_mqtt_remote_config_port)) : 0;
-
-	/* Allocate and populate config header */
-	hdr_buf = calloc(hdr_size, 1);
-	if (!hdr_buf) {
-		fprintf(stderr, "%s: Unable to allocate header buf\n",
-			__func__);
-		return -1;
-	}
-
-	remote_cfg = (struct tcp_over_mqtt_remote_config_hdr *)hdr_buf;
-	remote_cfg->config_size = hdr_size;
-	item_hdr = (struct tcp_over_mqtt_remote_config_item_hdr *)remote_cfg->data;
-	tmp_ptr = (char *)item_hdr;
-	if (session_cfg->ip_addr) {
-		item_hdr->config_type = REMOTE_CONFIG_TYPE_IP_ADDR;
-		item_ip_addr =
-			(struct tcp_over_mqtt_remote_config_ip_addr *)item_hdr->data;
-		item_ip_addr->ip_addr = session_cfg->ip_addr;
-		tmp_ptr += sizeof(*item_hdr) + sizeof(*item_ip_addr);
-		remote_cfg->num_config_items++;
-	}
-
-	item_hdr = (struct tcp_over_mqtt_remote_config_item_hdr *)tmp_ptr;
-	if (session_cfg->port) {
-		item_hdr->config_type = REMOTE_CONFIG_TYPE_PORT;
-		item_port =
-			(struct tcp_over_mqtt_remote_config_port *)item_hdr->data;
-		item_port->port = session_cfg->port;
-		tmp_ptr += sizeof(*item_hdr) + sizeof(*item_ip_addr);
-		remote_cfg->num_config_items++;
-	}
-
-	*cfg_hdr_buf = hdr_buf;
-	*cfg_hdr_size = hdr_size;
-
-	return 0;
-}
-
+/**
+ * TCP RX thread use by both served side and client side
+ */
 static void *tcp_session_rx_thread_fn(void *arg)
 {
 	uint8_t *rx_buf;
@@ -525,145 +282,10 @@ out:
 	return NULL;
 }
 
-static int connect_server_session(const struct tcp_session_config *session_cfg,
-				  int *tcp_sock)
-{
-	int ret;
-	static struct sockaddr_in server_addr;
-
-	server_addr = *tcp_server_addr;
-
-	/* Create TCP socket and connect to the server*/
-	*tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
-
-	if (session_cfg) {
-		if (session_cfg->ip_addr)
-			server_addr.sin_addr.s_addr = session_cfg->ip_addr;
-		if (session_cfg->port)
-			server_addr.sin_port = htons(session_cfg->port);
-	}
-
-	ret = connect(*tcp_sock,
-		      (const struct sockaddr *) &server_addr,
-		      sizeof(server_addr));
-	if (ret) {
-		fprintf(stderr, "%s: Unable to establish TCP connection. errno %d\n",
-			__func__, errno);
-		return -1;
-	}
-
-	return 0;
-}
-
-static int create_session(const char *session_id,
-			  size_t session_id_len,
-			  size_t *session_nbr,
-			  int tcp_sock,
-			  bool server_session,
-			  struct tcp_session_config *session_cfg)
-{
-	int ret;
-	size_t session_nbr_local;
-	char *session_id_local;
-
-	for (session_nbr_local = 0;
-	     session_nbr_local < MAX_SESSIONS;
-	     session_nbr_local++) {
-		if (!tcp_sessions[session_nbr_local].session_id)
-			break;
-	}
-
-	if (session_nbr_local >= MAX_SESSIONS) {
-		fprintf(stderr, "%s: No empty session slot found for new session\n",
-			 __func__);
-		return -1;
-	}
-
-	/* Server sessions are created from a received session ID.
-	 * Clients will create their own ID
-	 */
-	if (server_session) {
-		session_id_local = calloc(session_id_len + 1, 1);
-		strncpy(session_id_local,
-			session_id,
-			session_id_len);
-
-	} else {
-		session_id_local = gen_session_id();
-	}
-
-	if (server_session) {
-		ret = connect_server_session(session_cfg, &tcp_sock);
-		if (ret)
-			return -1;
-	} else {
-		/* Subscribe to data from the server for this session_id */
-		int mid;
-		char topic[MQTT_TOPIC_MAX_LEN];
-
-		snprintf(topic,
-			 sizeof(topic),
-			 "%s/%s/%s/rx",
-			 mqtt_topic_prefix,
-			 server_mqtt_id,
-			 session_id_local);
-
-		ret = mosquitto_subscribe(g_mqtt_client,
-					  &mid,
-					  topic,
-					  mqtt_qos);
-		if (ret) {
-			fprintf(stderr, "%s: mosquitto_subscribe %d (failed to subscribe to topic %s)\n",
-				__func__, ret, topic);
-			return -1;
-
-		}
-		fprintf(stderr, "%s: subscribed to %s\n", __func__, topic);
-	}
-
-	/* Create a session struct for the session*/
-	memset(&tcp_sessions[session_nbr_local], 0, sizeof(tcp_sessions[0]));
-	tcp_sessions[session_nbr_local].server_session = server_session;
-	tcp_sessions[session_nbr_local].session_id = session_id_local;
-	tcp_sessions[session_nbr_local].sock = tcp_sock;
-	tcp_sessions[session_nbr_local].rx_buf = calloc(SESSION_RX_BUF_SIZE, 1);
-	tcp_sessions[session_nbr_local].rx_backlog.expected_seq_nbr = 1;
-	tcp_sessions[session_nbr_local].tx_seq_nbr = 1;
-	tcp_sessions[session_nbr_local].publish_topic = calloc(MQTT_TOPIC_MAX_LEN, 1);
-	tcp_sessions[session_nbr_local].session_cfg = session_cfg;
-	if (server_session)
-		snprintf(tcp_sessions[session_nbr_local].publish_topic,
-			 MQTT_TOPIC_MAX_LEN,
-			 "%s/%s/%s/rx",
-			 mqtt_topic_prefix,
-			 server_mqtt_id,
-			 session_id_local);
-	else
-		snprintf(tcp_sessions[session_nbr_local].publish_topic,
-			 MQTT_TOPIC_MAX_LEN,
-			 "%s/%s/%s/tx",
-			 mqtt_topic_prefix,
-			 server_mqtt_id,
-			 session_id_local);
-
-	fprintf(stderr, "%s: Creating session thread for session %s, session number %lu\n",
-		 __func__,
-		 tcp_sessions[session_nbr_local].session_id,
-		 session_nbr_local);
-	ret = pthread_create(&tcp_rx_threads[session_nbr_local],
-			     NULL,
-			     &tcp_session_rx_thread_fn,
-			     &tcp_sessions[session_nbr_local]);
-	if (ret) {
-		fprintf(stderr, "%s: pthread_create %d\n", __func__, errno);
-		return -1;
-	}
-
-	*session_nbr = session_nbr_local;
-
-	return 0;
-}
-
+/**
+ * TCP accept thread use by client side only.
+ * A new session will be created for every new connection.
+ */
 static void *tcp_accept_thread_fn(void *arg)
 {
 	struct sockaddr_in client_addr;
@@ -699,8 +321,14 @@ static void *tcp_accept_thread_fn(void *arg)
 				     0,
 				     &session_nbr,
 				     client_sock,
+				     NULL,
 				     false, /*client session*/
-				     session_cfg);
+				     session_cfg,
+				     g_mqtt_client,
+				     mqtt_qos,
+				     mqtt_topic_prefix,
+				     server_mqtt_id,
+				     tcp_session_rx_thread_fn);
 		pthread_mutex_unlock(&session_mtx);
 		if (ret < 0) {
 			fprintf(stderr, "%s: Unable to create client session\n", __func__);
@@ -712,6 +340,11 @@ static void *tcp_accept_thread_fn(void *arg)
 	return NULL;
 }
 
+/**
+ * MQTT connect thread.
+ * Used to provide reliable reconnect to the MQTT server in case we are
+ * disconnected.
+ */
 static void *create_thread_fn(void *arg)
 {
 	int ret;
@@ -745,6 +378,10 @@ static void *create_thread_fn(void *arg)
 	return NULL;
 }
 
+/**
+ * MQTT beacon transmit thread.
+ * Used by server side to transmit beacon frames (only used bu server side).
+ */
 static void *beacon_tx_thread_fn(void *arg)
 {
 	struct timespec ts = {.tv_sec = 3};
@@ -772,70 +409,21 @@ static void *beacon_tx_thread_fn(void *arg)
 	return NULL;
 }
 
+/**
+ * MQTT beacon print thread.
+ * Used by client side to print available servers
+ */
 static void *beacon_print_thread_fn(void *arg)
 {
-	size_t server_nbr;
-	time_t cur_time;
 	struct timespec ts = {.tv_sec = 3};
 
 	for (;;) {
 		(void)nanosleep(&ts, NULL);
 
-		pthread_mutex_lock(&server_list_mtx);
-		cur_time = time(NULL);
-
-		/* Print the server list */
-		printf("Detected servers:\n\n");
-		printf("  %40s%30s\n\n", "Server ID", "Last seen (seconds ago)");
-
-		for (server_nbr = 0; server_nbr < MAX_SERVER_LIST; server_nbr++) {
-			if (!server_list[server_nbr].server_id)
-				break;
-
-			printf("  %40s%30ld\n",
-			       server_list[server_nbr].server_id,
-			       cur_time - server_list[server_nbr].last_seen_time);
-		}
-		printf("\n\n");
-		pthread_mutex_unlock(&server_list_mtx);
+		beacon_print_server_list();
 	}
 
 	return NULL;
-}
-
-static void handle_mqtt_message_list_servers(const char *recvd_client_id,
-					     size_t recvd_client_id_len)
-{
-	size_t server_nbr;
-	time_t cur_time;
-
-	pthread_mutex_lock(&server_list_mtx);
-	cur_time = time(NULL);
-
-	/* Add the server to the server list */
-	for (server_nbr = 0; server_nbr < MAX_SERVER_LIST; server_nbr++) {
-		if (!server_list[server_nbr].server_id) {
-			server_list[server_nbr].server_id =
-				calloc(recvd_client_id_len + 1, 1);
-			strncpy(server_list[server_nbr].server_id,
-				recvd_client_id,
-				recvd_client_id_len);
-			server_list[server_nbr].last_seen_time = cur_time;
-			break;
-		}
-
-		if (strncmp(server_list[server_nbr].server_id,
-			    recvd_client_id,
-			    recvd_client_id_len) == 0) {
-			server_list[server_nbr].last_seen_time = cur_time;
-			break;
-		}
-	}
-
-	pthread_mutex_unlock(&server_list_mtx);
-
-	if (server_nbr >= MAX_SERVER_LIST)
-		fprintf(stderr, "Server list exhausted!\n");
 }
 
 static void handle_remote_config(struct tcp_over_mqtt_remote_config_hdr *remote_cfg,
@@ -898,8 +486,8 @@ static void handle_mqtt_message(uint8_t *msg,
 
 	if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_BEACON) {
 		if (list_servers)
-			handle_mqtt_message_list_servers(recvd_client_id,
-							 recvd_client_id_len);
+			beacon_add_server_to_list(recvd_client_id,
+						  recvd_client_id_len);
 
 		return;
 	}
@@ -944,8 +532,14 @@ static void handle_mqtt_message(uint8_t *msg,
 				     session_id_len,
 				     &session_nbr,
 				     0,
+				     tcp_server_addr,
 				     true,  /*server session*/
-				     session_cfg);
+				     session_cfg,
+				     g_mqtt_client,
+				     mqtt_qos,
+				     mqtt_topic_prefix,
+				     server_mqtt_id,
+				     tcp_session_rx_thread_fn);
 		pthread_mutex_unlock(&session_mtx);
 		if (ret)
 			return;
@@ -1568,7 +1162,7 @@ int main(int argc, char **argv)
 	}
 
 	if (!server_mode && !client_id_set) {
-		gen_client_id();
+		gen_client_id(client_mqtt_id, sizeof(client_mqtt_id));
 		fprintf(stderr, "Missing client ID. Using random ID: %s\n", client_mqtt_id);
 	}
 
