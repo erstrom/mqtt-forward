@@ -923,7 +923,7 @@ int mqtt_forward_start(void)
 			fprintf(stderr, "%s: Server print thread: pthread_create %d\n", __func__, errno);
 			goto err;
 		}
-	} else if (transmit_beacons) {
+	} else if (server_mode && transmit_beacons) {
 		ret = pthread_create(&beacon_tx_thread,
 				     NULL,
 				     &beacon_tx_thread_fn,
