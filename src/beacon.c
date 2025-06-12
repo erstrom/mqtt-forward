@@ -50,7 +50,7 @@ void beacon_add_server_to_list(const char *recvd_client_id,
 		fprintf(stderr, "Server list exhausted!\n");
 }
 
-void beacon_print_server_list()
+void beacon_print_server_list(void)
 {
 	size_t server_nbr;
 	time_t cur_time;

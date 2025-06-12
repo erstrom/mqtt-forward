@@ -309,7 +309,7 @@ static void *tcp_accept_thread_fn(void *arg)
 
 		session_cfg = NULL;
 		if (remote_tcp_port_set || remote_tcp_server_addr_set) {
-			session_cfg = calloc(sizeof(*session_cfg), 1);
+			session_cfg = calloc(1, sizeof(*session_cfg));
 			session_cfg->ip_addr =
 				remote_tcp_server_addr_set ? remote_tcp_server_addr : 0;
 			session_cfg->port =
@@ -523,7 +523,7 @@ static void handle_mqtt_message(uint8_t *msg,
 		if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_REMOTE_CONFIG) {
 			remote_cfg = (struct tcp_over_mqtt_remote_config_hdr *)(msg + sizeof(*rx_hdr));
 			remote_cfg_offset = remote_cfg->config_size;
-			session_cfg = calloc(sizeof(*session_cfg), 1);
+			session_cfg = calloc(1, sizeof(*session_cfg));
 			handle_remote_config(remote_cfg, session_cfg);
 		}
 
@@ -1046,24 +1046,24 @@ int main(int argc, char **argv)
 	/* Check environment variables before reading command line options*/
 	env_var = getenv(ENV_VAR_MQTT_HOST);
 	if (env_var) {
-		strcpy(mqtt_host, env_var);
+		strncpy(mqtt_host, env_var, sizeof(mqtt_host));
 		mqtt_host_set = true;
 	}
 	env_var = getenv(ENV_VAR_ROOT_CA);
 	if (env_var) {
-		strcpy(mqtt_root_ca, env_var);
+		strncpy(mqtt_root_ca, env_var, sizeof(mqtt_root_ca));
 		mqtt_root_ca_set = true;
 		use_tls = true;
 	}
 	env_var = getenv(ENV_VAR_CERTIFICATE);
 	if (env_var) {
-		strcpy(mqtt_certificate, env_var);
+		strncpy(mqtt_certificate, env_var, sizeof(mqtt_certificate));
 		mqtt_certificate_set = true;
 		use_tls = true;
 	}
 	env_var = getenv(ENV_VAR_PRIVATE_KEY);
 	if (env_var) {
-		strcpy(mqtt_private_key, env_var);
+		strncpy(mqtt_private_key, env_var, sizeof(mqtt_private_key));
 		mqtt_private_key_set = true;
 		use_tls = true;
 	}
@@ -1072,7 +1072,7 @@ int main(int argc, char **argv)
 		strncpy(mqtt_topic_prefix, env_var, sizeof(mqtt_topic_prefix));
 	env_var = getenv(ENV_VAR_REMOTE_IP);
 	if (env_var) {
-		strcpy(remote_tcp_server_addr_str, env_var);
+		strncpy(remote_tcp_server_addr_str, env_var, sizeof(remote_tcp_server_addr_str));
 		remote_tcp_server_addr_set = true;
 	}
 	env_var = getenv(ENV_VAR_REMOTE_PORT);
@@ -1099,11 +1099,11 @@ int main(int argc, char **argv)
 			transmit_beacons = true;
 			break;
 		case 1005:
-			strcpy(client_mqtt_id, optarg);
+			strncpy(client_mqtt_id, optarg, sizeof(client_mqtt_id));
 			client_id_set = true;
 			break;
 		case 1006:
-			strcpy(server_mqtt_id, optarg);
+			strncpy(server_mqtt_id, optarg, sizeof(server_mqtt_id));
 			server_id_set = true;
 			break;
 		case 'p':
@@ -1111,7 +1111,7 @@ int main(int argc, char **argv)
 			tcp_port_set = true;
 			break;
 		case 'a':
-			strcpy(tcp_server_addr_str, optarg);
+			strncpy(tcp_server_addr_str, optarg, sizeof(tcp_server_addr_str));
 			tcp_server_addr_set = true;
 			break;
 		case 1000:
@@ -1119,19 +1119,19 @@ int main(int argc, char **argv)
 			mqtt_port_set = true;
 			break;
 		case 1001:
-			strcpy(mqtt_host, optarg);
+			strncpy(mqtt_host, optarg, sizeof(mqtt_host));
 			mqtt_host_set = true;
 			break;
 		case 1002:
-			strcpy(mqtt_root_ca, optarg);
+			strncpy(mqtt_root_ca, optarg, sizeof(mqtt_root_ca));
 			mqtt_root_ca_set = true;
 			break;
 		case 1003:
-			strcpy(mqtt_certificate, optarg);
+			strncpy(mqtt_certificate, optarg, sizeof(mqtt_certificate));
 			mqtt_certificate_set = true;
 			break;
 		case 1004:
-			strcpy(mqtt_private_key, optarg);
+			strncpy(mqtt_private_key, optarg, sizeof(mqtt_private_key));
 			mqtt_private_key_set = true;
 			break;
 		case 1007:
@@ -1146,7 +1146,7 @@ int main(int argc, char **argv)
 			remote_tcp_port_set = true;
 			break;
 		case 1010:
-			strcpy(remote_tcp_server_addr_str, optarg);
+			strncpy(remote_tcp_server_addr_str, optarg, sizeof(remote_tcp_server_addr_str));
 			remote_tcp_server_addr_set = true;
 			break;
 		case 'h':
@@ -1175,7 +1175,7 @@ int main(int argc, char **argv)
 	}
 
 	if (server_mode && !tcp_server_addr_set) {
-		strcpy(tcp_server_addr_str, "127.0.0.1");
+		strncpy(tcp_server_addr_str, "127.0.0.1", sizeof(tcp_server_addr_str));
 		fprintf(stderr, "Missing server address. Using default addr %s\n", tcp_server_addr_str);
 	}
 
