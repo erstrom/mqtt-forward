@@ -116,7 +116,7 @@ Build with cmake::
 
     mkdir build
     cd build
-    cmake ..
+    cmake -DCMAKE_BUILD_TYPE=release ..
     make
     sudo make install
     cd -
