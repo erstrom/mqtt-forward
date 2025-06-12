@@ -1,0 +1,3 @@
+[submodule "scripts/checkpatch"]
+	path = scripts/checkpatch
+	url = https://github.com/erstrom/checkpatch.git
