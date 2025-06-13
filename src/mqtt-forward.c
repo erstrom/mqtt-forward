@@ -1046,33 +1046,33 @@ int main(int argc, char **argv)
 	/* Check environment variables before reading command line options*/
 	env_var = getenv(ENV_VAR_MQTT_HOST);
 	if (env_var) {
-		strncpy(mqtt_host, env_var, sizeof(mqtt_host));
+		snprintf(mqtt_host, sizeof(mqtt_host), "%s", env_var);
 		mqtt_host_set = true;
 	}
 	env_var = getenv(ENV_VAR_ROOT_CA);
 	if (env_var) {
-		strncpy(mqtt_root_ca, env_var, sizeof(mqtt_root_ca));
+		snprintf(mqtt_root_ca, sizeof(mqtt_root_ca), "%s", env_var);
 		mqtt_root_ca_set = true;
 		use_tls = true;
 	}
 	env_var = getenv(ENV_VAR_CERTIFICATE);
 	if (env_var) {
-		strncpy(mqtt_certificate, env_var, sizeof(mqtt_certificate));
+		snprintf(mqtt_certificate, sizeof(mqtt_certificate), "%s", env_var);
 		mqtt_certificate_set = true;
 		use_tls = true;
 	}
 	env_var = getenv(ENV_VAR_PRIVATE_KEY);
 	if (env_var) {
-		strncpy(mqtt_private_key, env_var, sizeof(mqtt_private_key));
+		snprintf(mqtt_private_key, sizeof(mqtt_private_key), "%s", env_var);
 		mqtt_private_key_set = true;
 		use_tls = true;
 	}
 	env_var = getenv(ENV_VAR_TOPIC_PREFIX);
 	if (env_var)
-		strncpy(mqtt_topic_prefix, env_var, sizeof(mqtt_topic_prefix));
+		snprintf(mqtt_topic_prefix, sizeof(mqtt_topic_prefix), "%s", env_var);
 	env_var = getenv(ENV_VAR_REMOTE_IP);
 	if (env_var) {
-		strncpy(remote_tcp_server_addr_str, env_var, sizeof(remote_tcp_server_addr_str));
+		snprintf(remote_tcp_server_addr_str, sizeof(remote_tcp_server_addr_str), "%s", env_var);
 		remote_tcp_server_addr_set = true;
 	}
 	env_var = getenv(ENV_VAR_REMOTE_PORT);
@@ -1099,11 +1099,11 @@ int main(int argc, char **argv)
 			transmit_beacons = true;
 			break;
 		case 1005:
-			strncpy(client_mqtt_id, optarg, sizeof(client_mqtt_id));
+			snprintf(client_mqtt_id, sizeof(client_mqtt_id), "%s", optarg);
 			client_id_set = true;
 			break;
 		case 1006:
-			strncpy(server_mqtt_id, optarg, sizeof(server_mqtt_id));
+			snprintf(server_mqtt_id, sizeof(server_mqtt_id), "%s", optarg);
 			server_id_set = true;
 			break;
 		case 'p':
@@ -1111,7 +1111,7 @@ int main(int argc, char **argv)
 			tcp_port_set = true;
 			break;
 		case 'a':
-			strncpy(tcp_server_addr_str, optarg, sizeof(tcp_server_addr_str));
+			snprintf(tcp_server_addr_str, sizeof(tcp_server_addr_str), "%s", optarg);
 			tcp_server_addr_set = true;
 			break;
 		case 1000:
@@ -1119,19 +1119,19 @@ int main(int argc, char **argv)
 			mqtt_port_set = true;
 			break;
 		case 1001:
-			strncpy(mqtt_host, optarg, sizeof(mqtt_host));
+			snprintf(mqtt_host, sizeof(mqtt_host), "%s", optarg);
 			mqtt_host_set = true;
 			break;
 		case 1002:
-			strncpy(mqtt_root_ca, optarg, sizeof(mqtt_root_ca));
+			snprintf(mqtt_root_ca, sizeof(mqtt_root_ca), "%s", optarg);
 			mqtt_root_ca_set = true;
 			break;
 		case 1003:
-			strncpy(mqtt_certificate, optarg, sizeof(mqtt_certificate));
+			snprintf(mqtt_certificate, sizeof(mqtt_certificate), "%s", optarg);
 			mqtt_certificate_set = true;
 			break;
 		case 1004:
-			strncpy(mqtt_private_key, optarg, sizeof(mqtt_private_key));
+			snprintf(mqtt_private_key, sizeof(mqtt_private_key), "%s", optarg);
 			mqtt_private_key_set = true;
 			break;
 		case 1007:
@@ -1139,14 +1139,14 @@ int main(int argc, char **argv)
 			mqtt_qos_set = true;
 			break;
 		case 1008:
-			strncpy(mqtt_topic_prefix, optarg, sizeof(mqtt_topic_prefix));
+			snprintf(mqtt_topic_prefix, sizeof(mqtt_topic_prefix), "%s", optarg);
 			break;
 		case 1009:
 			remote_tcp_port = strtol(optarg, NULL, 10);
 			remote_tcp_port_set = true;
 			break;
 		case 1010:
-			strncpy(remote_tcp_server_addr_str, optarg, sizeof(remote_tcp_server_addr_str));
+			snprintf(remote_tcp_server_addr_str, sizeof(remote_tcp_server_addr_str), "%s", optarg);
 			remote_tcp_server_addr_set = true;
 			break;
 		case 'h':
