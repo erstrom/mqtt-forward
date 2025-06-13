@@ -37,6 +37,7 @@
 #define ENV_VAR_TOPIC_PREFIX "MQTT_FORWARD_TOPIC_PREFIX"
 #define ENV_VAR_REMOTE_IP   "MQTT_FORWARD_REMOTE_IP"
 #define ENV_VAR_REMOTE_PORT "MQTT_FORWARD_REMOTE_PORT"
+#define ENV_VAR_SERVER_ID   "MQTT_FORWARD_SERVER_ID"
 
 /**
  * Global variables
@@ -963,6 +964,7 @@ static void print_usage(char *prog_name)
 	fprintf(stderr, "  MQTT_FORWARD_PRIVATE_KEY     See option --mqtt-private-key\n");
 	fprintf(stderr, "  MQTT_FORWARD_REMOTE_IP       See option --remote-ip\n");
 	fprintf(stderr, "  MQTT_FORWARD_REMOTE_PORT     See option --remote-port\n");
+	fprintf(stderr, "  MQTT_FORWARD_SERVER_ID       See option --server-side-id\n");
 	fprintf(stderr, "Note: Environment variables will be overridden by command-line options.\n");
 	fprintf(stderr, "\n");
 
@@ -1079,6 +1081,11 @@ int main(int argc, char **argv)
 	if (env_var) {
 		remote_tcp_port = strtol(env_var, NULL, 10);
 		remote_tcp_port_set = true;
+	}
+	env_var = getenv(ENV_VAR_SERVER_ID);
+	if (env_var) {
+		snprintf(server_mqtt_id, sizeof(server_mqtt_id), "%s", env_var);
+		server_id_set = true;
 	}
 
 	while ((c = getopt_long(argc, argv, "hdtslba:p:", long_options, &option_index)) != -1) {

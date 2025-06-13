@@ -97,11 +97,12 @@ Here is an example. Variables have been exported in a text file::
     export MQTT_FORWARD_ROOT_CA=/path/to/root_ca.pem
     export MQTT_FORWARD_CERTIFICATE=/path/to/cert.pem
     export MQTT_FORWARD_PRIVATE_KEY=/path/to/private_key.pem
+    export MQTT_FORWARD_SERVER_ID=my-server-id
 
 Source the environment setup file once and run the program::
 
     . mqtt-forward-env
-    mqtt-forward --server-side-id my-server-id -p 1234
+    mqtt-forward -p 1234
 
 Build
 -----
