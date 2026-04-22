@@ -28,7 +28,7 @@ else
 	MOSQUITTO_CONF="./mosquitto-unsecure.conf"
 fi
 
-# Create environment file for docker-compose
+# Create environment file for Docker Compose
 UID_GID="$(id -u)":"$(id -g)"
 echo "UID_GID=${UID_GID}" > "${SCRIPT_DIR}"/mosquitto/.env
 echo "MOSQUITTO_CONF=${MOSQUITTO_CONF}" >> "${SCRIPT_DIR}"/mosquitto/.env

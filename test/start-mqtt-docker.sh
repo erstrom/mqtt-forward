@@ -9,4 +9,4 @@ fi
 
 cd "${SCRIPT_DIR}"/mosquitto || exit 1
 
-docker-compose up -d
+docker compose up -d

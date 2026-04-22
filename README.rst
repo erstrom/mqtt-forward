@@ -249,7 +249,7 @@ Both secure and unsecure setups are supported.
 With the secure setup, the MQTT broker will only accept connections from clients with certificates signed by the same CA as the broker certificate.
 With the unsecure setup, all TLS security have been disabled and the broker will accept all clients.
 
-The test scripts and docker-compose file can also be used as an example of how to setup mqtt-forward together with the mosquitto mqtt broker.
+The test scripts and Docker Compose file can also be used as an example of how to setup mqtt-forward together with the mosquitto mqtt broker.
 
 The test framework is comprised of one mosquitto instance running in a docker container and two instances of mqtt-forward.
 The mqtt-forward instances are setup for SSH forwarding. Both instances will connect to the same broker.
