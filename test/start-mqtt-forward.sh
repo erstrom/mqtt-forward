@@ -61,7 +61,7 @@ if [[ "${SECURE}" -eq 1 ]]; then
 	SECURE_ARGS="--tls --mqtt-root-ca ${CA} --mqtt-certificate ${CERT} --mqtt-private-key ${PRIVATE_KEY} "
 fi
 
-"${MQTT_FORWARD}" --server-side-id "${SERVER_SIDE_ID}" \
+exec "${MQTT_FORWARD}" --server-side-id "${SERVER_SIDE_ID}" \
 ${SECURE_ARGS} \
 ${SERVER_SIDE_ARGS} \
 -p "${PORT}" \

@@ -47,3 +47,4 @@ build
 # test related files
 test/mosquitto/.env
 test/mosquitto/mosquitto-certs
+test/.pids
