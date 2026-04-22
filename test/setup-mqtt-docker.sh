@@ -20,15 +20,18 @@ done
 
 if [[ "${SECURE}" -eq 1 ]]; then
 	MOSQUITTO_CONF="./mosquitto-secure.conf"
+	MOSQUITTO_PORT=8883
 	# Create certificates
 	"${SCRIPT_DIR}"/mosquitto/generate-certs.sh init
 	"${SCRIPT_DIR}"/mosquitto/generate-certs.sh client client-side
 	"${SCRIPT_DIR}"/mosquitto/generate-certs.sh client server-side
 else
 	MOSQUITTO_CONF="./mosquitto-unsecure.conf"
+	MOSQUITTO_PORT=1883
 fi
 
 # Create environment file for Docker Compose
 UID_GID="$(id -u)":"$(id -g)"
 echo "UID_GID=${UID_GID}" > "${SCRIPT_DIR}"/mosquitto/.env
 echo "MOSQUITTO_CONF=${MOSQUITTO_CONF}" >> "${SCRIPT_DIR}"/mosquitto/.env
+echo "MOSQUITTO_PORT=${MOSQUITTO_PORT}" >> "${SCRIPT_DIR}"/mosquitto/.env
