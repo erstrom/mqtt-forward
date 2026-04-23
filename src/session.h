@@ -41,6 +41,7 @@ struct tx_packet_backlog {
 
 struct tcp_session {
 	bool server_session;
+	bool closing;
 	char *session_id;
 	char *publish_topic;
 	int sock;
@@ -56,6 +57,7 @@ struct tcp_session {
  */
 void clear_rx_packet_backlog(struct rx_packet_backlog *rx_backlog);
 void clear_tx_packet_backlog(struct tx_packet_backlog *tx_backlog);
+void request_session_close(struct tcp_session *session_data);
 void clear_session(struct tcp_session *session_data);
 int create_session(const char *session_id,
 		   size_t session_id_len,

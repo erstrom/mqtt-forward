@@ -1,9 +1,11 @@
 #include "beacon.h"
 #include "session.h"
+#include "utils.h"
 #include <pthread.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_SERVER_LIST 30
 
@@ -36,9 +38,9 @@ void beacon_add_server_to_list(const char *recvd_client_id,
 			break;
 		}
 
-		if (strncmp(server_list[server_nbr].server_id,
-			    recvd_client_id,
-			    recvd_client_id_len) == 0) {
+		if (sized_str_eq(server_list[server_nbr].server_id,
+				 recvd_client_id,
+				 recvd_client_id_len)) {
 			server_list[server_nbr].last_seen_time = cur_time;
 			break;
 		}

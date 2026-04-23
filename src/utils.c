@@ -5,6 +5,11 @@
 #include <stdint.h>
 #include <openssl/rand.h>
 
+bool sized_str_eq(const char *str, const char *buf, size_t buf_len)
+{
+	return strlen(str) == buf_len && memcmp(str, buf, buf_len) == 0;
+}
+
 char *gen_random_id(size_t n_nibbles)
 {
 	int i;

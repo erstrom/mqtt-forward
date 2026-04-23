@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <unistd.h>
 
 
 struct tcp_session tcp_sessions[MAX_SESSIONS];
@@ -17,6 +18,23 @@ char *old_session_ids[MAX_LIFETIME_SESSIONS];
 size_t num_old_sessions;
 
 static pthread_t tcp_rx_threads[MAX_SESSIONS];
+
+static void store_old_session_id(char *session_id)
+{
+	if (!session_id)
+		return;
+
+	if (num_old_sessions < MAX_LIFETIME_SESSIONS) {
+		old_session_ids[num_old_sessions++] = session_id;
+		return;
+	}
+
+	free(old_session_ids[0]);
+	memmove(&old_session_ids[0],
+		&old_session_ids[1],
+		sizeof(old_session_ids[0]) * (MAX_LIFETIME_SESSIONS - 1));
+	old_session_ids[MAX_LIFETIME_SESSIONS - 1] = session_id;
+}
 
 static int connect_server_session(const struct tcp_session_config *session_cfg,
 				  struct sockaddr_in *tcp_server_addr,
@@ -29,6 +47,11 @@ static int connect_server_session(const struct tcp_session_config *session_cfg,
 
 	/* Create TCP socket and connect to the server*/
 	*tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (*tcp_sock < 0) {
+		fprintf(stderr, "%s: Unable to create TCP socket. errno %d\n",
+			__func__, errno);
+		return -1;
+	}
 
 	if (session_cfg) {
 		if (session_cfg->ip_addr)
@@ -43,6 +66,8 @@ static int connect_server_session(const struct tcp_session_config *session_cfg,
 	if (ret) {
 		fprintf(stderr, "%s: Unable to establish TCP connection. errno %d\n",
 			__func__, errno);
+		close(*tcp_sock);
+		*tcp_sock = -1;
 		return -1;
 	}
 
@@ -74,15 +99,34 @@ void clear_tx_packet_backlog(struct tx_packet_backlog *tx_backlog)
 	       sizeof(tx_backlog->backlog[0])*SESSION_BACKLOG_SIZE);
 }
 
+void request_session_close(struct tcp_session *session_data)
+{
+	pthread_mutex_lock(&session_mtx);
+	if (session_data->session_id && !session_data->closing) {
+		session_data->closing = true;
+		if (session_data->sock >= 0)
+			(void)shutdown(session_data->sock, SHUT_RDWR);
+	}
+	pthread_mutex_unlock(&session_mtx);
+}
+
 void clear_session(struct tcp_session *session_data)
 {
+	pthread_mutex_lock(&session_mtx);
+	if (!session_data->session_id) {
+		pthread_mutex_unlock(&session_mtx);
+		return;
+	}
+
 	fprintf(stderr, "%s: TCP session %s terminated\n",
 		__func__, session_data->session_id);
-	pthread_mutex_lock(&session_mtx);
+
 	/* Store the session ID of the cleared session in the old session id
 	 * array
 	 */
-	old_session_ids[num_old_sessions++] = session_data->session_id;
+	store_old_session_id(session_data->session_id);
+	if (session_data->sock >= 0)
+		close(session_data->sock);
 	free(session_data->rx_buf);
 	free(session_data->publish_topic);
 	free(session_data->session_cfg);
@@ -127,18 +171,24 @@ int create_session(const char *session_id,
 	 */
 	if (server_session) {
 		session_id_local = calloc(session_id_len + 1, 1);
+		if (!session_id_local)
+			return -1;
 		strncpy(session_id_local,
 			session_id,
 			session_id_len);
 
 	} else {
 		session_id_local = gen_session_id();
+		if (!session_id_local)
+			return -1;
 	}
 
 	if (server_session) {
 		ret = connect_server_session(session_cfg, tcp_server_addr, &tcp_sock);
-		if (ret)
+		if (ret) {
+			free(session_id_local);
 			return -1;
+		}
 	} else {
 		/* Subscribe to data from the server for this session_id */
 		int mid;
@@ -158,6 +208,7 @@ int create_session(const char *session_id,
 		if (ret) {
 			fprintf(stderr, "%s: mosquitto_subscribe %d (failed to subscribe to topic %s)\n",
 				__func__, ret, topic);
+			free(session_id_local);
 			return -1;
 
 		}
@@ -174,6 +225,16 @@ int create_session(const char *session_id,
 	tcp_sessions[session_nbr_local].tx_seq_nbr = 1;
 	tcp_sessions[session_nbr_local].publish_topic = calloc(MQTT_TOPIC_MAX_LEN, 1);
 	tcp_sessions[session_nbr_local].session_cfg = session_cfg;
+	if (!tcp_sessions[session_nbr_local].rx_buf ||
+	    !tcp_sessions[session_nbr_local].publish_topic) {
+		free(tcp_sessions[session_nbr_local].rx_buf);
+		free(tcp_sessions[session_nbr_local].publish_topic);
+		free(session_id_local);
+		if (server_session && tcp_sock >= 0)
+			close(tcp_sock);
+		memset(&tcp_sessions[session_nbr_local], 0, sizeof(tcp_sessions[0]));
+		return -1;
+	}
 	if (server_session)
 		snprintf(tcp_sessions[session_nbr_local].publish_topic,
 			 MQTT_TOPIC_MAX_LEN,
@@ -199,6 +260,12 @@ int create_session(const char *session_id,
 			     &tcp_sessions[session_nbr_local]);
 	if (ret) {
 		fprintf(stderr, "%s: pthread_create %d\n", __func__, errno);
+		free(tcp_sessions[session_nbr_local].rx_buf);
+		free(tcp_sessions[session_nbr_local].publish_topic);
+		free(session_id_local);
+		if (server_session && tcp_sock >= 0)
+			close(tcp_sock);
+		memset(&tcp_sessions[session_nbr_local], 0, sizeof(tcp_sessions[0]));
 		return -1;
 	}
 
@@ -206,5 +273,3 @@ int create_session(const char *session_id,
 
 	return 0;
 }
-
-

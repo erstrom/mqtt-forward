@@ -148,6 +148,11 @@ static void *tcp_session_rx_thread_fn(void *arg)
 
 	for (;;) {
 		pthread_mutex_lock(&session_mtx);
+		if (session_data->closing) {
+			pthread_mutex_unlock(&session_mtx);
+			break;
+		}
+
 		backlog_offset = session_data->tx_seq_nbr - tx_backlog->acked_seq_nbr - 1;
 
 		if (backlog_offset > TX_WINDOW_LIMIT) {
@@ -338,6 +343,12 @@ static void *tcp_accept_thread_fn(void *arg)
 		session_cfg = NULL;
 		if (remote_tcp_port_set || remote_tcp_server_addr_set) {
 			session_cfg = calloc(1, sizeof(*session_cfg));
+			if (!session_cfg) {
+				fprintf(stderr, "%s: Unable to allocate session config\n",
+					__func__);
+				close(client_sock);
+				continue;
+			}
 			session_cfg->ip_addr =
 				remote_tcp_server_addr_set ? remote_tcp_server_addr : 0;
 			session_cfg->port =
@@ -360,6 +371,7 @@ static void *tcp_accept_thread_fn(void *arg)
 		pthread_mutex_unlock(&session_mtx);
 		if (ret < 0) {
 			fprintf(stderr, "%s: Unable to create client session\n", __func__);
+			free(session_cfg);
 			close(client_sock);
 			continue;
 		}
@@ -548,7 +560,7 @@ static void handle_mqtt_message(uint8_t *msg,
 	/* Check if there is a session for this session ID */
 	for (session_nbr = 0; session_nbr < MAX_SESSIONS; session_nbr++) {
 		if ((tcp_sessions[session_nbr].session_id) &&
-		    (strncmp(tcp_sessions[session_nbr].session_id, session_id, session_id_len) == 0)) {
+		    sized_str_eq(tcp_sessions[session_nbr].session_id, session_id, session_id_len)) {
 			break;
 		}
 	}
@@ -566,7 +578,7 @@ static void handle_mqtt_message(uint8_t *msg,
 		 * discarded
 		 */
 		for (i = 0; i < num_old_sessions; i++) {
-			if (strncmp(old_session_ids[i], session_id, session_id_len) == 0) {
+			if (sized_str_eq(old_session_ids[i], session_id, session_id_len)) {
 				fprintf(stderr, "%s: Session ID %s is an old session. Message discarded\n",
 					__func__, old_session_ids[i]);
 				return;
@@ -623,6 +635,13 @@ static void handle_mqtt_message(uint8_t *msg,
 		}
 	}
 
+	pthread_mutex_lock(&session_mtx);
+	if (tcp_sessions[session_nbr].closing) {
+		pthread_mutex_unlock(&session_mtx);
+		return;
+	}
+	pthread_mutex_unlock(&session_mtx);
+
 	rx_backlog = &tcp_sessions[session_nbr].rx_backlog;
 	tx_backlog = &tcp_sessions[session_nbr].tx_backlog;
 
@@ -646,7 +665,7 @@ static void handle_mqtt_message(uint8_t *msg,
 			 * and should be removed.
 			 */
 			pthread_mutex_unlock(&session_mtx);
-			clear_session(&tcp_sessions[session_nbr]);
+			request_session_close(&tcp_sessions[session_nbr]);
 			return;
 		}
 
@@ -722,7 +741,7 @@ static void handle_mqtt_message(uint8_t *msg,
 		if (ret < 0) {
 			fprintf(stderr, "%s: send failed. errno %d. Clearing session %s\n",
 				__func__, errno, tcp_sessions[session_nbr].session_id);
-			clear_session(&tcp_sessions[session_nbr]);
+			request_session_close(&tcp_sessions[session_nbr]);
 			return;
 		}
 
@@ -928,6 +947,10 @@ int mqtt_forward_init(void)
 	}
 
 	g_mqtt_client = mosquitto_new(client_id, true, NULL);
+	if (!g_mqtt_client) {
+		fprintf(stderr, "%s: mosquitto_new failed\n", __func__);
+		goto err;
+	}
 
 	if (use_tls) {
 		ret = mosquitto_tls_set(g_mqtt_client,
@@ -936,6 +959,10 @@ int mqtt_forward_init(void)
 					mqtt_certificate,
 					mqtt_private_key,
 					NULL);
+		if (ret) {
+			fprintf(stderr, "%s: mosquitto_tls_set %d\n", __func__, ret);
+			goto err;
+		}
 	}
 
 	mosquitto_max_inflight_messages_set(g_mqtt_client, 20);
@@ -1281,7 +1308,7 @@ int main(int argc, char **argv)
 		struct in_addr in_addr;
 
 		ret = inet_aton(remote_tcp_server_addr_str, &in_addr);
-		if (ret < 0) {
+		if (ret == 0) {
 			fprintf(stderr, "Invalid remote IP addr: %s\n",
 				remote_tcp_server_addr_str);
 			return -1;
@@ -1300,7 +1327,7 @@ int main(int argc, char **argv)
 	ret = mqtt_forward_init();
 	if (ret < 0)
 		return -1;
-	mqtt_forward_start();
+	ret = mqtt_forward_start();
 	if (ret < 0)
 		return -1;
 	mqtt_forward_wait();
