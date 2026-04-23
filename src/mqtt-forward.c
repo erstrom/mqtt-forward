@@ -77,6 +77,33 @@ static char mqtt_private_key[100];
 static char mqtt_topic_prefix[50];
 static char tcp_server_addr_str[100];
 
+static int send_all(int sock, const uint8_t *buf, size_t len)
+{
+	size_t sent_len = 0;
+
+	while (sent_len < len) {
+		ssize_t ret;
+
+		ret = send(sock,
+			   buf + sent_len,
+			   len - sent_len,
+			   MSG_NOSIGNAL);
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (ret == 0) {
+			errno = EPIPE;
+			return -1;
+		}
+
+		sent_len += ret;
+	}
+
+	return 0;
+}
+
 /**
  * TCP RX thread use by both served side and client side
  */
@@ -427,38 +454,57 @@ static void *beacon_print_thread_fn(void *arg)
 	return NULL;
 }
 
-static void handle_remote_config(struct tcp_over_mqtt_remote_config_hdr *remote_cfg,
-				 struct tcp_session_config *session_cfg)
+static int handle_remote_config(struct tcp_over_mqtt_remote_config_hdr *remote_cfg,
+				size_t remote_cfg_len,
+				struct tcp_session_config *session_cfg)
 {
 	int cfg_idx;
 	struct tcp_over_mqtt_remote_config_item_hdr *item_hdr;
 	struct tcp_over_mqtt_remote_config_ip_addr *item_ip_addr;
 	struct tcp_over_mqtt_remote_config_port *item_port;
-	char *tmp_ptr;
+	uint8_t *tmp_ptr;
+	uint8_t *cfg_end;
 
+	if (remote_cfg_len < sizeof(*remote_cfg))
+		return -1;
+
+	if (remote_cfg->config_size != remote_cfg_len)
+		return -1;
+
+	cfg_end = (uint8_t *)remote_cfg + remote_cfg_len;
 	item_hdr = (struct tcp_over_mqtt_remote_config_item_hdr *)remote_cfg->data;
 	for (cfg_idx = 0; cfg_idx < remote_cfg->num_config_items; cfg_idx++) {
-		tmp_ptr = (char *)item_hdr;
+		tmp_ptr = (uint8_t *)item_hdr;
+		if (tmp_ptr + sizeof(*item_hdr) > cfg_end)
+			return -1;
+
 		switch (item_hdr->config_type) {
 		case REMOTE_CONFIG_TYPE_IP_ADDR:
+			if (tmp_ptr + sizeof(*item_hdr) + sizeof(*item_ip_addr) > cfg_end)
+				return -1;
 			item_ip_addr =
 				(struct tcp_over_mqtt_remote_config_ip_addr *)item_hdr->data;
 			session_cfg->ip_addr = item_ip_addr->ip_addr;
 			tmp_ptr += sizeof(*item_hdr) + sizeof(*item_ip_addr);
 			break;
 		case REMOTE_CONFIG_TYPE_PORT:
+			if (tmp_ptr + sizeof(*item_hdr) + sizeof(*item_port) > cfg_end)
+				return -1;
 			item_port =
 				(struct tcp_over_mqtt_remote_config_port *)item_hdr->data;
 			session_cfg->port = item_port->port;
 			tmp_ptr += sizeof(*item_hdr) + sizeof(*item_port);
 			break;
 		default:
-			goto out;
+			return -1;
 		}
 		item_hdr = (struct tcp_over_mqtt_remote_config_item_hdr *)tmp_ptr;
 	}
-out:
-	return;
+
+	if ((uint8_t *)item_hdr != cfg_end)
+		return -1;
+
+	return 0;
 }
 
 static void handle_mqtt_message(uint8_t *msg,
@@ -482,6 +528,12 @@ static void handle_mqtt_message(uint8_t *msg,
 	size_t session_nbr;
 	size_t remote_cfg_offset = 0;
 	struct tcp_session_config *session_cfg = NULL;
+
+	if (msg_len < (int)sizeof(*rx_hdr)) {
+		fprintf(stderr, "%s: MQTT payload too short: %d\n",
+			__func__, msg_len);
+		return;
+	}
 
 	rx_hdr = (struct tcp_over_mqtt_hdr *) msg;
 
@@ -522,10 +574,33 @@ static void handle_mqtt_message(uint8_t *msg,
 		}
 
 		if (rx_hdr->flags & TCP_OVER_MQTT_FLAG_REMOTE_CONFIG) {
+			if (msg_len < (int)(sizeof(*rx_hdr) + sizeof(*remote_cfg))) {
+				fprintf(stderr, "%s: Remote config header too short\n", __func__);
+				return;
+			}
+
 			remote_cfg = (struct tcp_over_mqtt_remote_config_hdr *)(msg + sizeof(*rx_hdr));
 			remote_cfg_offset = remote_cfg->config_size;
+			if ((remote_cfg_offset < sizeof(*remote_cfg)) ||
+			    (remote_cfg_offset > (size_t)(msg_len - sizeof(*rx_hdr)))) {
+				fprintf(stderr, "%s: Invalid remote config size: %zu\n",
+					__func__, remote_cfg_offset);
+				return;
+			}
+
 			session_cfg = calloc(1, sizeof(*session_cfg));
-			handle_remote_config(remote_cfg, session_cfg);
+			if (!session_cfg)
+				return;
+
+			ret = handle_remote_config(remote_cfg,
+						   remote_cfg_offset,
+						   session_cfg);
+			if (ret) {
+				fprintf(stderr, "%s: Invalid remote config data\n",
+					__func__);
+				free(session_cfg);
+				return;
+			}
 		}
 
 		pthread_mutex_lock(&session_mtx);
@@ -542,8 +617,10 @@ static void handle_mqtt_message(uint8_t *msg,
 				     server_mqtt_id,
 				     tcp_session_rx_thread_fn);
 		pthread_mutex_unlock(&session_mtx);
-		if (ret)
+		if (ret) {
+			free(session_cfg);
 			return;
+		}
 	}
 
 	rx_backlog = &tcp_sessions[session_nbr].rx_backlog;
@@ -568,6 +645,7 @@ static void handle_mqtt_message(uint8_t *msg,
 			 * from a previous session. The session is thus invalid
 			 * and should be removed.
 			 */
+			pthread_mutex_unlock(&session_mtx);
 			clear_session(&tcp_sessions[session_nbr]);
 			return;
 		}
@@ -621,18 +699,7 @@ static void handle_mqtt_message(uint8_t *msg,
 
 	if (backlog_offset > SESSION_BACKLOG_SIZE - 2) {
 		fprintf(stderr, "%s: backlog exceeded\n", __func__);
-		/* A packet is probably lost :(
-		 * move forward in the backlog until a valid packet is found
-		 */
-		while (!rx_backlog->backlog[rx_backlog->read_idx].buf) {
-			fprintf(stderr, "%s: Packet %ld dropped!\n",
-				__func__,
-				rx_backlog->expected_seq_nbr);
-			rx_backlog->expected_seq_nbr++;
-			rx_backlog->read_idx++;
-			rx_backlog->read_idx %= SESSION_BACKLOG_SIZE;
-			backlog_offset--;
-		}
+		return;
 	}
 
 	backlog_write_idx =
@@ -649,13 +716,12 @@ static void handle_mqtt_message(uint8_t *msg,
 	memcpy(rx_backlog->backlog[backlog_write_idx].buf, data, data_len);
 
 	while (rx_backlog->backlog[rx_backlog->read_idx].buf) {
-		ret = send(tcp_sessions[session_nbr].sock,
-			   rx_backlog->backlog[rx_backlog->read_idx].buf,
-			   rx_backlog->backlog[rx_backlog->read_idx].len,
-			   MSG_NOSIGNAL);
-		if ((ret < 0) && (errno == EPIPE)) {
-			fprintf(stderr, "%s: Remote socket closed. Clearing session %s\n",
-				__func__, tcp_sessions[session_nbr].session_id);
+		ret = send_all(tcp_sessions[session_nbr].sock,
+			       rx_backlog->backlog[rx_backlog->read_idx].buf,
+			       rx_backlog->backlog[rx_backlog->read_idx].len);
+		if (ret < 0) {
+			fprintf(stderr, "%s: send failed. errno %d. Clearing session %s\n",
+				__func__, errno, tcp_sessions[session_nbr].session_id);
 			clear_session(&tcp_sessions[session_nbr]);
 			return;
 		}
